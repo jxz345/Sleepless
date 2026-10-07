@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-07
+
+### Added
+- Custom auto-off timer length. The timer now offers **Off · 1h · 2h · Custom**; choosing
+  Custom reveals an hours + minutes row (with steppers) where you can set any length from
+  1 minute to 24 hours. Changes apply immediately and restart a running countdown. The
+  last custom length is remembered, but the timer itself is still never re-armed on launch.
+
+### Fixed
+- The menu-bar icon no longer changes width when it switches state, so neighbouring icons
+  stop shifting, and it is more robust on macOS 26: a fixed square slot with a remembered
+  position, automatic re-creation if the system drops it, and a state pulse that no longer
+  touches the button's layer. Based on upstream PRs #1 (Farnood Faraji) and #5 (g150446).
+
 ## [1.2.7] - 2026-06-03
 
 ### Changed

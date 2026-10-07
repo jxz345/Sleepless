@@ -62,7 +62,7 @@ Cliquez ensuite sur la tasse dans la barre des menus, basculez l'interrupteur et
 | | | |
 |---|---|---|
 | ☕ | **Un seul interrupteur** | Cliquez sur la tasse dans la barre des menus, basculez l'interrupteur. |
-| ⏲️ | **Minuterie d'extinction automatique** | 1 h ou 2 h avec compte à rebours en direct, puis extinction. |
+| ⏲️ | **Minuterie d'extinction automatique** | 1 h, 2 h ou une durée personnalisée jusqu'à 24 h, avec compte à rebours en direct, puis extinction. |
 | 🔋 | **Plancher de batterie** | Extinction automatique entre 5 et 50 % sur batterie (15 % par défaut). |
 | 🪫 | **Mode Économie d'énergie** | S'efface quand le mode Économie d'énergie est actif, sur batterie. |
 | 🖥️ | **Sans dongle** | Capot fermé, sur batterie. Sans moniteur, sans fiche HDMI. |

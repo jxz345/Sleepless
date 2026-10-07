@@ -62,7 +62,7 @@ Klicke dann auf die Tasse in der Menüleiste, lege den Schalter um und schließe
 | | | |
 |---|---|---|
 | ☕ | **Ein Schalter** | Klicke auf die Tasse in der Menüleiste, lege den Schalter um. |
-| ⏲️ | **Abschalt-Timer** | 1 h oder 2 h mit laufendem Countdown, danach aus. |
+| ⏲️ | **Abschalt-Timer** | 1 h, 2 h oder eine eigene Dauer bis 24 h, mit laufendem Countdown, danach aus. |
 | 🔋 | **Akku-Mindeststand** | Auto-Abschaltung bei 5–50 % im Akkubetrieb (Standard 15 %). |
 | 🪫 | **Low Power Mode** | Tritt zur Seite, wenn LPM im Akkubetrieb aktiv ist. |
 | 🖥️ | **Kein Dongle** | Deckel geschlossen, im Akkubetrieb. Kein Monitor, kein HDMI-Stecker. |

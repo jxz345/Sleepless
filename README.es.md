@@ -62,7 +62,7 @@ Luego haz clic en la taza de la barra de menús, activa el interruptor y cierra 
 | | | |
 |---|---|---|
 | ☕ | **Un solo interruptor** | Haz clic en la taza de la barra de menús y activa el conmutador. |
-| ⏲️ | **Temporizador de apagado** | 1 h o 2 h con cuenta atrás en vivo, y luego se apaga. |
+| ⏲️ | **Temporizador de apagado** | 1 h, 2 h o una duración personalizada de hasta 24 h, con cuenta atrás en vivo, y luego se apaga. |
 | 🔋 | **Nivel mínimo de batería** | Apagado automático al 5–50 % con batería (15 % por defecto). |
 | 🪫 | **Low Power Mode** | Se hace a un lado cuando LPM está activado, con batería. |
 | 🖥️ | **Sin adaptador** | Tapa cerrada, con batería. Sin monitor, sin enchufe HDMI. |
