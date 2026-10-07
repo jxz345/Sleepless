@@ -202,7 +202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var customRowShown = false
 
     private let popoverWidth: CGFloat = 320
-    private let popoverHeight: CGFloat = 432
+    private let popoverHeight: CGFloat = 460
     private let customRowHeight: CGFloat = 30
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -301,11 +301,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // GROUP 2 — auto-off timer (label + segmented [Off | 1h | 2h | Custom] + optional
         // custom-duration row + countdown)
-        let g2y = g1y + g1h + 12, g2h: CGFloat = 78
+        let g2y = g1y + g1h + 12, g2h: CGFloat = 106
         let g2 = makeCard(NSRect(x: pad, y: g2y, width: contentW, height: g2h))
         timerCard = g2
         let timerLabel = makeLabel("Auto-off timer", font: .systemFont(ofSize: 13), color: .labelColor)
-        timerLabel.frame = NSRect(x: ci, y: ci + 3, width: 110, height: 22)
+        timerLabel.frame = NSRect(x: ci, y: ci, width: cw, height: 22)   // own row: 4 segments need the full width
         g2.addSubview(timerLabel)
         autoOffControl = NSSegmentedControl(labels: ["Off", "1h", "2h", "Custom"],
                                             trackingMode: .selectOne,
@@ -313,13 +313,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         autoOffControl.selectedSegment = 0
         autoOffControl.controlSize = .regular
         autoOffControl.segmentStyle = .automatic
-        autoOffControl.sizeToFit()
-        let segSize = autoOffControl.frame.size
-        let segW = segSize.width > 0 ? segSize.width : 150
-        autoOffControl.frame = NSRect(x: contentW - ci - segW, y: ci, width: segW, height: max(segSize.height, 24))
+        autoOffControl.segmentDistribution = .fillEqually
+        autoOffControl.frame = NSRect(x: ci, y: ci + 28, width: cw, height: 24)
         g2.addSubview(autoOffControl)
         // Custom duration: [ H ]⇅ h  [ MM ]⇅ m. Applies immediately; hidden unless "Custom".
-        let row = FlippedView(frame: NSRect(x: ci, y: ci + 34, width: cw, height: 22))
+        let row = FlippedView(frame: NSRect(x: ci, y: ci + 62, width: cw, height: 22))
         row.isHidden = true
         customRow = row
         func makeNumberField(x: CGFloat) -> NSTextField {
@@ -356,7 +354,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         g2.addSubview(row)
         renderCustomDuration()
         countdownLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
-        countdownLabel.frame = NSRect(x: ci, y: ci + 36, width: cw, height: 16)
+        countdownLabel.frame = NSRect(x: ci, y: ci + 64, width: cw, height: 16)
         g2.addSubview(countdownLabel)
 
         // GROUP 3 — battery-floor (label + value + slider + min/max hints)
@@ -585,7 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let s = sender as? NSStepper {
             if s === hoursStepper { h = s.integerValue } else { m = s.integerValue }
         } else if let f = sender as? NSTextField {
-            let v = Int(f.stringValue.trimmingCharacters(in: .whitespaces))
+            let v = Int(f.stringValue.trimmingCharacters(in: .whitespaces)).flatMap { $0 >= 0 ? $0 : nil }
             if f === hoursField { h = v ?? h } else { m = v ?? m }
         }
         let total = min(max(h * 60 + m, customMin), customMax)
