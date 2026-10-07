@@ -70,27 +70,43 @@ enum SleepGlyph {
 private func makeCupGlyph(_ glyph: SleepGlyph) -> NSImage {
     let cfg = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular).applying(.init(scale: .medium))
     let name = (glyph == .off) ? "cup.and.saucer" : "cup.and.heat.waves.fill"
-    let base = NSImage(systemSymbolName: name, accessibilityDescription: "Sleepless")?
-        .withSymbolConfiguration(cfg)
-        ?? NSImage(systemSymbolName: "cup.and.saucer.fill", accessibilityDescription: "Sleepless")
-        ?? NSImage()
+    func symbol(_ name: String) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: "Sleepless")?
+            .withSymbolConfiguration(cfg)
+    }
+    let base = symbol(name) ?? symbol("cup.and.saucer.fill") ?? NSImage()
 
-    guard glyph == .armed else {
+    let symbolSize = base.size
+    guard symbolSize.width > 0, symbolSize.height > 0 else {
         base.isTemplate = true
         return base
     }
-    // ARMED: full steaming cup + a small filled dot top-right (the "auto-off safety net is live"
-    // mark). Drawn in template black so it tints + inverts with the menu bar exactly like the cup.
-    let size = base.size
-    guard size.width > 0, size.height > 0 else { base.isTemplate = true; return base }
-    let composed = NSImage(size: size)
+    // Render every state centred in the same canvas (the union of both cup symbols) so the
+    // menu-bar slot never changes width when the icon swaps. A status item that resizes on
+    // every toggle shifts its neighbours and, on macOS 26, is prone to being hidden.
+    // (Upstream PRs #1 and #5.)
+    let canvasSize = ["cup.and.saucer", "cup.and.heat.waves.fill"]
+        .compactMap { symbol($0)?.size }
+        .reduce(symbolSize) { size, candidate in
+            NSSize(width: max(size.width, candidate.width), height: max(size.height, candidate.height))
+        }
+
+    let composed = NSImage(size: canvasSize)
     composed.lockFocus()
-    base.draw(in: NSRect(origin: .zero, size: size))
-    let d = max(size.height * 0.26, 4)
-    let dot = NSBezierPath(ovalIn: NSRect(x: size.width - d, y: size.height - d, width: d, height: d))
-    NSColor.black.setFill()
-    dot.fill()
+    base.draw(in: NSRect(x: (canvasSize.width - symbolSize.width) / 2,
+                         y: (canvasSize.height - symbolSize.height) / 2,
+                         width: symbolSize.width,
+                         height: symbolSize.height))
+    if glyph == .armed {
+        // ARMED: full steaming cup + a small filled dot top-right (the "auto-off safety net is live"
+        // mark). Drawn in template black so it tints + inverts with the menu bar exactly like the cup.
+        let d = max(symbolSize.height * 0.26, 4)
+        let dot = NSBezierPath(ovalIn: NSRect(x: canvasSize.width - d, y: canvasSize.height - d, width: d, height: d))
+        NSColor.black.setFill()
+        dot.fill()
+    }
     composed.unlockFocus()
+    composed.alignmentRect = NSRect(origin: .zero, size: canvasSize)
     composed.isTemplate = true
     return composed
 }
@@ -193,12 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         batteryFloorPercent = min(max((UserDefaults.standard.object(forKey: floorKey) as? Int) ?? floorDefault, floorMin), floorMax)
         customMinutes = min(max((UserDefaults.standard.object(forKey: customKey) as? Int) ?? customDefault, customMin), customMax)
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            button.image = offGlyph
-            button.action = #selector(statusClicked)
-            button.target = self
-        }
+        createStatusItem()
         popover.behavior = .applicationDefined   // app-managed dismissal (no transient close/reopen flicker)
         popover.animates = true
         popover.contentSize = NSSize(width: popoverWidth, height: popoverHeight)
@@ -207,6 +218,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()   // reflect TRUE system state on launch (never a stale assumption)
         timer = Timer.scheduledTimer(timeInterval: pollInterval, target: self,
                                      selector: #selector(poll), userInfo: nil, repeats: true)
+    }
+
+    // Create (or recreate) the menu-bar item: a fixed square slot with an autosave name so its
+    // position is remembered. (Upstream PRs #1 and #5.)
+    private func createStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem.autosaveName = "Sleepless"
+        statusItem.isVisible = true
+        if let button = statusItem.button {
+            button.image = offGlyph
+            button.action = #selector(statusClicked)
+            button.target = self
+        }
+    }
+
+    // macOS 26 can drop a status item's backing button; re-create it if so. Deliberately does NOT
+    // force isVisible on every poll, which would undo the user hiding the icon in System Settings.
+    private func ensureStatusItemExists() {
+        guard statusItem == nil || statusItem.button == nil else { return }
+        if let stale = statusItem { NSStatusBar.system.removeStatusItem(stale) }
+        createStatusItem()
     }
 
     // MARK: - Popover content (native NSSwitch toggle, macOS-aligned)
@@ -486,17 +518,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // A brief, subtle pulse on the menu-bar glyph whenever the state (and thus the cup
-    // shape) changes, so the change is noticeable. Opacity-only: no layer geometry is
-    // mutated, so it can't shift the status item on any macOS version.
+    // shape) changes, so the change is noticeable. Uses the AppKit animator proxy only: touching
+    // NSStatusBarButton's CALayer is fragile on macOS 26 and has been seen to make status items
+    // disappear. (Upstream PR #5.)
     private func pulseStatusItem() {
         guard let b = statusItem.button else { return }
-        b.wantsLayer = true
-        let pulse = CABasicAnimation(keyPath: "opacity")
-        pulse.fromValue = 0.3
-        pulse.toValue = 1.0
-        pulse.duration = 0.34
-        pulse.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        b.layer?.add(pulse, forKey: "statePulse")
+        b.alphaValue = 0.3
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.34
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            b.animator().alphaValue = 1.0
+        }
     }
 
     @objc private func poll() { refresh() }
@@ -621,6 +653,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Core state sync
     @objc private func refresh() {
+        ensureStatusItemExists()
         let on = readSleepDisabled()
         applyUI(on: on)
         if on { enforceSafetyNets() }
