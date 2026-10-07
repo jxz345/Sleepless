@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.3.0] - 2026-10-07
+## [1.2.7-jxz.1] - 2026-10-07
+
+Fork release ([jxz345/Sleepless](https://github.com/jxz345/Sleepless)) built on upstream
+1.2.7. Fork versions are `<upstream base>-jxz.<n>` so they never collide with upstream
+releases. See [UPDATE_NOTES.md](https://github.com/jxz345/Sleepless/blob/main/UPDATE_NOTES.md) for the full background.
+
+### Changed
+- Quitting Sleepless now restores normal sleep. Previously, quitting or deleting the app
+  while it was keeping the Mac awake left `disablesleep` on with nothing running to turn it
+  off, until the next reboot. The reset now runs on the Quit button, logout, an AppleEvent
+  quit (what `brew uninstall` sends), and `kill`/`killall` (SIGTERM, SIGINT, SIGHUP).
+- `brew uninstall --cask sleepless` also restores normal sleep, and `--zap` removes the
+  passwordless grant too.
 
 ### Added
 - Custom auto-off timer length. The timer now offers **Off · 1h · 2h · Custom**; choosing
@@ -16,10 +28,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   last custom length is remembered, but the timer itself is still never re-armed on launch.
 
 ### Fixed
+- Installation guidance now covers a macOS 27 launch block where Sleepless appears in
+  Activity Monitor without an icon and **Open Anyway** is ineffective or absent. After
+  verifying the downloaded app and quitting any stalled process, the tested recovery is:
+  ```sh
+  xattr -dr com.apple.quarantine "/Applications/Sleepless.app"
+  codesign --verify --deep --strict --verbose=2 "/Applications/Sleepless.app"
+  open "/Applications/Sleepless.app"
+  ```
+  If macOS refuses the attribute change, allow the terminal's host app under Privacy &
+  Security → App Management. Homebrew keeps normal quarantine behavior; this is an explicit
+  recovery step for the installed app. The existing passwordless grant can be reused.
+  Manual grant instructions now invoke the bundled script through `/bin/bash`.
 - The menu-bar icon no longer changes width when it switches state, so neighbouring icons
   stop shifting, and it is more robust on macOS 26: a fixed square slot with a remembered
   position, automatic re-creation if the system drops it, and a state pulse that no longer
   touches the button's layer. Based on upstream PRs #1 (Farnood Faraji) and #5 (g150446).
+
+This replacement publication retains version `1.2.7-jxz.1` and its application code, with
+corrected installation documentation and rebuilt release assets. To refresh a cached copy
+of this version before reinstalling, run `brew fetch --force --cask jxz345/tap/sleepless`
+after updating the tap. Use the replacement release's `SHA256SUMS` for verification.
 
 ## [1.2.7] - 2026-06-03
 

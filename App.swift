@@ -9,7 +9,9 @@
 //   READ (no root): pmset -g | grep -i SleepDisabled  (value 1 = ON; 0/absent = OFF)
 // The OFF/ON commands run passwordless via a tightly-scoped /etc/sudoers.d drop-in.
 // disablesleep is runtime-only and resets to 0 on reboot, and that reset is a
-// deliberate safety feature; the app does NOT auto re-arm.
+// deliberate safety feature; the app does NOT auto re-arm. Quitting the app (Quit button,
+// logout, `brew uninstall`, SIGTERM/SIGINT/SIGHUP) also restores normal sleep, so removing
+// Sleepless can never leave the Mac unable to sleep with no app running to turn it off.
 //
 // UI: clicking the menu-bar coffee cup opens a small native popover with an NSSwitch
 // toggle (the System-Settings control), a state caption, an auto-off timer, the
@@ -218,6 +220,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()   // reflect TRUE system state on launch (never a stale assumption)
         timer = Timer.scheduledTimer(timeInterval: pollInterval, target: self,
                                      selector: #selector(poll), userInfo: nil, repeats: true)
+        installTerminationSignalHandlers()
+    }
+
+    // MARK: - Restore normal sleep on quit
+    // A deleted .app can't run code, so the only reliable moment to undo disablesleep is when
+    // the app quits (which Finder, `brew uninstall`, and logout all trigger first). sudo -n with
+    // the exact granted argv: synchronous, never prompts. SIGKILL/crash can't be caught; a
+    // reboot still resets it.
+    func applicationWillTerminate(_ notification: Notification) {
+        if readSleepDisabled() { setDisableSleep(false) }
+    }
+
+    // `kill`/`killall` (SIGTERM), Ctrl-C (SIGINT) and SIGHUP would otherwise end the process
+    // without applicationWillTerminate. Route them through a normal terminate instead.
+    private var signalSources: [DispatchSourceSignal] = []
+    private func installTerminationSignalHandlers() {
+        for sig in [SIGTERM, SIGINT, SIGHUP] {
+            signal(sig, SIG_IGN)   // let the dispatch source, not the default action, handle it
+            let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            src.setEventHandler { NSApp.terminate(nil) }
+            src.resume()
+            signalSources.append(src)
+        }
     }
 
     // Create (or recreate) the menu-bar item: a fixed square slot with an autosave name so its
@@ -396,6 +421,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Footer — Quit (separated by space, not a hairline)
         let quit = NSButton(title: "Quit Sleepless", target: self, action: #selector(quit))
+        quit.toolTip = "Quits Sleepless and restores normal sleep."
         quit.controlSize = .regular
         quit.bezelStyle = .rounded
         quit.sizeToFit()
