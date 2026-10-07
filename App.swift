@@ -22,7 +22,7 @@
 //
 // Three small, fail-safe features layer on top, none of which adds a daemon or
 // persists OS state (so "reboot resets it" still holds):
-//   1. Auto-off timer (1h / 2h) — a one-shot in-memory Timer that flips sleep back
+//   1. Auto-off timer (1h / 2h / custom up to 24h) — a one-shot in-memory Timer that flips sleep back
 //      on when it fires. Dies on quit; nothing survives a reboot.
 //   2. Launch at login (SMAppService.mainApp) — OFF by default. The app always
 //      launches reading the TRUE system state, so a login launch can never
@@ -45,6 +45,11 @@ private let floorKey = "batteryFloorPercent"
 private let floorDefault = 15
 private let floorMin = 5
 private let floorMax = 50
+// Custom auto-off length (minutes; the last chosen length is persisted, never an armed timer).
+private let customKey = "customAutoOffMinutes"
+private let customDefault = 90
+private let customMin = 1
+private let customMax = 24 * 60
 
 // MARK: - Menu-bar coffee glyph (native SF Symbols, MONOCHROME template — state by SHAPE)
 // macOS convention: a menu-bar extra is a template image (no colour) so it adapts to light/dark
@@ -162,17 +167,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var userForcedOn = false   // user deliberately turned it on; honor over the Low Power Mode auto-off (the hard battery floor still wins)
 
     // Auto-off timer (in-memory; dies on quit, never survives a reboot)
-    private var autoOffMinutes = 0           // 0 = none (stay on until off), 60, or 120
+    private var autoOffMinutes = 0           // 0 = none (stay on until off), 60, 120, or customMinutes
+    private var customMinutes = customDefault
     private var keepAwakeTimer: Timer?       // one-shot: flips sleep back on when it fires
     private var countdownTicker: Timer?      // 1 Hz label refresh, only while the popover is open
     private var timerEndDate: Date?
 
+    // Custom-duration row (shown only while the "Custom" segment is selected)
+    private var customRow: NSView!
+    private var hoursField: NSTextField!
+    private var minutesField: NSTextField!
+    private var hoursStepper: NSStepper!
+    private var minutesStepper: NSStepper!
+    // Views below the timer card, shifted when the custom row shows/hides
+    private var rootView: NSView!
+    private var timerCard: CardView!
+    private var belowTimerViews: [NSView] = []
+    private var customRowShown = false
+
     private let popoverWidth: CGFloat = 320
     private let popoverHeight: CGFloat = 432
+    private let customRowHeight: CGFloat = 30
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         batteryFloorPercent = min(max((UserDefaults.standard.object(forKey: floorKey) as? Int) ?? floorDefault, floorMin), floorMax)
+        customMinutes = min(max((UserDefaults.standard.object(forKey: customKey) as? Int) ?? customDefault, customMin), customMax)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = offGlyph
@@ -247,13 +267,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         captionLabel.cell?.wraps = true
         g1.addSubview(captionLabel)
 
-        // GROUP 2 — auto-off timer (label + segmented [Off | 1h | 2h] + countdown)
+        // GROUP 2 — auto-off timer (label + segmented [Off | 1h | 2h | Custom] + optional
+        // custom-duration row + countdown)
         let g2y = g1y + g1h + 12, g2h: CGFloat = 78
         let g2 = makeCard(NSRect(x: pad, y: g2y, width: contentW, height: g2h))
+        timerCard = g2
         let timerLabel = makeLabel("Auto-off timer", font: .systemFont(ofSize: 13), color: .labelColor)
         timerLabel.frame = NSRect(x: ci, y: ci + 3, width: 110, height: 22)
         g2.addSubview(timerLabel)
-        autoOffControl = NSSegmentedControl(labels: ["Off", "1h", "2h"],
+        autoOffControl = NSSegmentedControl(labels: ["Off", "1h", "2h", "Custom"],
                                             trackingMode: .selectOne,
                                             target: self, action: #selector(autoOffChanged(_:)))
         autoOffControl.selectedSegment = 0
@@ -264,6 +286,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let segW = segSize.width > 0 ? segSize.width : 150
         autoOffControl.frame = NSRect(x: contentW - ci - segW, y: ci, width: segW, height: max(segSize.height, 24))
         g2.addSubview(autoOffControl)
+        // Custom duration: [ H ]⇅ h  [ MM ]⇅ m. Applies immediately; hidden unless "Custom".
+        let row = FlippedView(frame: NSRect(x: ci, y: ci + 34, width: cw, height: 22))
+        row.isHidden = true
+        customRow = row
+        func makeNumberField(x: CGFloat) -> NSTextField {
+            let f = NSTextField(frame: NSRect(x: x, y: 0, width: 40, height: 22))
+            f.alignment = .right
+            f.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+            f.target = self
+            f.action = #selector(customDurationChanged(_:))
+            f.cell?.sendsActionOnEndEditing = true   // commit on Tab / click-away, not only Enter
+            row.addSubview(f)
+            return f
+        }
+        func makeStepper(x: CGFloat, min: Double, max: Double, increment: Double) -> NSStepper {
+            let s = NSStepper(frame: NSRect(x: x, y: 0, width: 15, height: 22))
+            s.minValue = min; s.maxValue = max; s.increment = increment
+            s.valueWraps = false
+            s.target = self
+            s.action = #selector(customDurationChanged(_:))
+            row.addSubview(s)
+            return s
+        }
+        let unitFont = NSFont.systemFont(ofSize: 13)
+        hoursField = makeNumberField(x: 0)
+        hoursStepper = makeStepper(x: 42, min: 0, max: 24, increment: 1)
+        let hLabel = makeLabel("h", font: unitFont, color: .secondaryLabelColor)
+        hLabel.frame = NSRect(x: 60, y: 2, width: 16, height: 18)
+        row.addSubview(hLabel)
+        minutesField = makeNumberField(x: 82)
+        // -5 / 60 are sentinels: stepping past either end carries into the hours.
+        minutesStepper = makeStepper(x: 124, min: -5, max: 60, increment: 5)
+        let mLabel = makeLabel("m", font: unitFont, color: .secondaryLabelColor)
+        mLabel.frame = NSRect(x: 142, y: 2, width: 16, height: 18)
+        row.addSubview(mLabel)
+        g2.addSubview(row)
+        renderCustomDuration()
         countdownLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
         countdownLabel.frame = NSRect(x: ci, y: ci + 36, width: cw, height: 16)
         g2.addSubview(countdownLabel)
@@ -313,6 +372,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let qs = quit.frame.size
         quit.frame = NSRect(x: W - pad - qs.width, y: g4y + g4h + 12, width: qs.width, height: qs.height)
         root.addSubview(quit)
+        rootView = root
+        belowTimerViews = [g3, g4, quit]
 
         let vc = NSViewController()
         vc.view = root
@@ -445,8 +506,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch sender.selectedSegment {
         case 1: autoOffMinutes = 60
         case 2: autoOffMinutes = 120
+        case 3: autoOffMinutes = customMinutes
         default: autoOffMinutes = 0
         }
+        layoutTimerCard(showCustom: sender.selectedSegment == 3)
         if isOn, autoOffMinutes > 0 {
             startKeepAwakeTimer(minutes: autoOffMinutes)
         } else {
@@ -477,8 +540,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         cancelKeepAwakeTimer()
         autoOffMinutes = 0
         autoOffControl?.selectedSegment = 0
+        layoutTimerCard(showCustom: false)
         applyUI(on: readSleepDisabled())
         notify("Auto-off timer ended. Sleepless turned off.")
+    }
+
+    // Custom duration edited (field commit or stepper click). Everything is reduced to a single
+    // total in minutes, clamped to [customMin, customMax], then redistributed into h + m — so the
+    // minutes stepper's -5 / 60 sentinels carry into the hours, and junk input reverts.
+    @objc private func customDurationChanged(_ sender: Any) {
+        var h = customMinutes / 60, m = customMinutes % 60
+        if let s = sender as? NSStepper {
+            if s === hoursStepper { h = s.integerValue } else { m = s.integerValue }
+        } else if let f = sender as? NSTextField {
+            let v = Int(f.stringValue.trimmingCharacters(in: .whitespaces))
+            if f === hoursField { h = v ?? h } else { m = v ?? m }
+        }
+        let total = min(max(h * 60 + m, customMin), customMax)
+        renderCustomDuration(total)
+        guard total != customMinutes else { return }
+        customMinutes = total
+        UserDefaults.standard.set(total, forKey: customKey)
+        guard autoOffControl?.selectedSegment == 3 else { return }
+        autoOffMinutes = total
+        if isOn { startKeepAwakeTimer(minutes: total) }   // restart the countdown at the new length
+    }
+
+    private func renderCustomDuration(_ total: Int? = nil) {
+        let t = total ?? customMinutes
+        hoursField?.stringValue = "\(t / 60)"
+        minutesField?.stringValue = String(format: "%02d", t % 60)
+        hoursStepper?.integerValue = t / 60
+        minutesStepper?.integerValue = t % 60
+    }
+
+    // Show/hide the custom row: grow/shrink the timer card, push the cards below it, and resize
+    // the popover. Frames are absolute in a flipped root, so this is a plain vertical shift.
+    private func layoutTimerCard(showCustom: Bool) {
+        guard showCustom != customRowShown, let card = timerCard, let root = rootView else { return }
+        customRowShown = showCustom
+        let dy = showCustom ? customRowHeight : -customRowHeight
+        customRow.isHidden = !showCustom
+        card.frame.size.height += dy
+        countdownLabel.frame.origin.y += dy
+        for v in belowTimerViews { v.frame.origin.y += dy }
+        root.frame.size.height += dy
+        popover.contentSize = NSSize(width: popoverWidth, height: root.frame.height)
     }
 
     private func startCountdownTicker() {
