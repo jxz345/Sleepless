@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.3.0] - 2026-10-07
+## [1.2.7-jxz.1] - 2026-10-07
+
+Fork release ([jxz345/Sleepless](https://github.com/jxz345/Sleepless)) built on upstream
+1.2.7. Fork versions are `<upstream base>-jxz.<n>` so they never collide with upstream
+releases. See [UPDATE_NOTES.md](https://github.com/jxz345/Sleepless/blob/main/UPDATE_NOTES.md) for the full background.
+
+### Changed
+- Quitting Sleepless now restores normal sleep. Previously, quitting or deleting the app
+  while it was keeping the Mac awake left `disablesleep` on with nothing running to turn it
+  off, until the next reboot. The reset now runs on the Quit button, logout, an AppleEvent
+  quit (what `brew uninstall` sends), and `kill`/`killall` (SIGTERM, SIGINT, SIGHUP).
+- `brew uninstall --cask sleepless` also restores normal sleep, and `--zap` removes the
+  passwordless grant too.
 
 ### Added
 - Custom auto-off timer length. The timer now offers **Off · 1h · 2h · Custom**; choosing
