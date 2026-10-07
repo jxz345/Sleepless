@@ -192,12 +192,12 @@ locked, clicks are ignored and `screencapture` fails with "could not create imag
 P='pop over 1 of menu bar item 1 of menu bar 1'
 ax() { osascript -e "tell application \"System Events\" to tell process \"Sleepless\" to $1"; }
 ax "click menu bar item 1 of menu bar 1"                       # open the popover
-ax "click radio button 4 of radio group 1 of $P"               # Custom
+ax "click radio button 5 of radio group 1 of $P"               # Custom
 ax "perform action \"AXIncrement\" of incrementor 2 of $P"     # minutes +5
 ax "get value of text field 1 of $P"                           # hours
 ax "get value of every static text of $P"                      # includes "Auto-off in h:mm:ss"
 ax "click button 1 of $P"                                      # keep-awake switch
-ax "click button 3 of $P"                                      # Quit
+ax "click button \"Quit Sleepless\" of $P"                                      # Quit
 pmset -g | grep SleepDisabled                                  # ground truth
 ```
 Hidden controls (the custom row when it isn't selected) drop out of the AX tree, so their
@@ -305,3 +305,110 @@ For a fresh app installation on this same Mac, quit Sleepless, uninstall with
 `brew uninstall --cask jxz345/tap/sleepless` (without `--zap`), then fetch and install the
 replacement. Preserve the existing preferences and grant, verify the downloaded checksum,
 and distinguish the normal first-launch result from any subsequent manual recovery.
+
+### Homebrew replacement retest
+
+The replacement was published from commit `3ed30fccf27f3d09eae86a61eccea3538c860ca0`
+under the existing `v1.2.7-jxz.1` tag. CI and the release workflow passed. The published ZIP's
+SHA-256 is `c1f5eed3e7185499120855948280272d8922fa2f79178eec9c95dbbd1cd94dd6`;
+its build attestation was verified against that source commit, tag, and release workflow.
+Tap commit `148b1af99db5a946ba9c4690018b82b3a6f8e972` installs this checksum and prints
+the recovery instructions.
+
+On this Mac, the app was quit with normal sleep restored, uninstalled without `--zap`,
+force-fetched, and installed with `brew install --cask jxz345/tap/sleepless`. The cached ZIP
+matched the replacement checksum, all installed bundle files matched the verified archive,
+and strict signature verification passed. Homebrew retained quarantine metadata.
+
+The first launch produced a Gatekeeper prompt and no menu-bar item during the initial
+check. The user confirmed clicking **OK** on a prompt and **Open Anyway**. A second process
+then reached the normal AppKit event loop **before** quarantine was removed. The app was
+subsequently stopped, the documented app-only quarantine removal was exercised, and its
+signature was verified again. Because approval and recovery both occurred before the UI
+checks, this retest does **not** establish that quarantine removal was required after
+Open Anyway. Unlike the earlier failure, approval prompts did appear in this retest.
+
+After relaunch, the installed app passed UI checks: on set `SleepDisabled 1`, off set `0`,
+an AppleEvent quit while on exited and restored `0`, and relaunch showed a responsive
+menu-bar item and popover with keep-awake off. The app was left running with normal sleep
+enabled. The 20% battery floor and 165-minute custom timer preferences survived, and the
+existing grant worked with cached sudo authentication ignored. This was a fresh app
+installation on the same Mac, not a clean-machine or first-time grant test.
+
+### Independent user confirmation
+
+After that retest, the user repeated `brew install` independently and reported that it
+"works great." Before the next development round, the installed app was running with
+normal sleep enabled and still had quarantine metadata (`01c1;…`). This confirms that
+the successful installation was not dependent on keeping quarantine permanently absent.
+The earlier app-only `xattr` recovery remains a fallback for the observed blocked-launch
+state; the evidence does not establish why that earlier state failed to show usable prompts.
+
+---
+
+## 9. Complete uninstall and the 8-hour preset (2026-10-07)
+
+### Removal behavior
+
+The popover now has **Uninstall…** beside **Quit Sleepless**, in both the collapsed and
+expanded timer layouts. The confirmation defaults to **Cancel** and lists what will be
+removed. On confirmation, the app copies its uninstaller into a private temporary directory
+and opens Terminal to run it, then quits. Copying the script lets it finish even after the
+app bundle is removed; shell and AppleScript quoting are handled separately. If Terminal
+cannot accept the command, the app displays an error and stays installed and running.
+
+The complete uninstaller:
+
+1. Validates the target bundle and checks whether a Homebrew receipt actually owns that path.
+2. Requests administrator authentication once with `sudo -v` before removal. Every later
+   privileged command uses `sudo -n`, so failure or expiry stops cleanup instead of prompting
+   repeatedly. Homebrew itself always runs as the user.
+3. Restores and reads back `SleepDisabled 0`. A failed command or unreadable state stops
+   removal. This clears Sleepless's override; it does not reset other macOS power preferences.
+4. Unregisters `SMAppService.mainApp` through the executable's noninteractive
+   `--unregister-login-item` mode, unloads any legacy launch agent, quits the target process,
+   and verifies sleep again before removing the grant.
+5. For Homebrew, runs the matching fully qualified `brew uninstall --cask` to remove the app
+   and receipt. For a manual installation, removes the validated bundle. It then removes
+   Sleepless's grant, legacy login plist, and preferences, checks sudoers syntax, and verifies
+   the final files and sleep state before reporting success.
+
+The first live implementation used `brew uninstall --zap` and asked for a second password.
+The user reported this during testing. The final flow uses plain Homebrew removal followed
+by explicit cleanup in the already-authenticated Terminal session, avoiding that extra
+Homebrew authorization. The old uninstaller also ignored failed sleep resets and left
+preferences behind; both behaviors were corrected.
+
+Plain `brew uninstall` retains the grant and preferences for reinstall/upgrade compatibility,
+but now has a mandatory, independent restore-and-verify backstop before removing the app.
+It works when the app is stopped; if sleep is disabled and the grant is unavailable, it
+keeps the app installed and prints the manual reset command. Full cleanup remains the
+button's behavior; the cask also retains its explicit `--zap` option.
+
+### Timer change
+
+The current segments are **Off · 1h · 2h · 8h · Custom**. The new preset is 480 minutes.
+Custom moves to the fifth segment; both row visibility and edits use the updated index.
+Segments use proportional widths so the longer Custom label fits within the existing
+popover. Selecting a preset while on restarts its countdown; relaunch still defaults to Off.
+
+### Validation
+
+- Shell regression checks cover sleep already off/on, missing or unreadable state, denied
+  reset, unsuccessful readback, cancelled authentication, and cleanup failure without a false
+  success message. Fixtures exercise quoted paths, wrong bundle IDs, symlinks, matching and
+  damaged Homebrew receipts, and a separate manual copy. Cleanup tests verify that only one
+  interactive authentication is requested and that the brew command does not use `--zap`.
+- Live UI checks verified the confirmation and Cancel, both footer layouts, all three preset
+  countdowns (including `8:00:00`), Custom row visibility, Off cancelling the countdown,
+  quit restoring normal sleep, and relaunch with the timer Off.
+- A temporary local tap exercised normal Homebrew removal with keep-awake enabled and with
+  a simulated leftover `SleepDisabled 1` while the app was stopped. Both ended at `0` and
+  preserved the grant.
+- The first complete-removal test verified absence of the app, grant, preferences, and
+  Homebrew receipt, with `SleepDisabled 0`. Reinstallation confirmed Launch at login was off,
+  and the app's native first-time grant setup successfully restored its scoped permission.
+- The revised button was then tested starting with keep-awake on. Its Terminal transcript
+  contained exactly **one** password prompt and ended with successful cleanup. Independent
+  checks confirmed that the app, grant, preferences, legacy login plist, and Homebrew receipt
+  were absent and `SleepDisabled` was `0`.

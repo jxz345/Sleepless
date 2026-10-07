@@ -10,12 +10,12 @@
 // The OFF/ON commands run passwordless via a tightly-scoped /etc/sudoers.d drop-in.
 // disablesleep is runtime-only and resets to 0 on reboot, and that reset is a
 // deliberate safety feature; the app does NOT auto re-arm. Quitting the app (Quit button,
-// logout, `brew uninstall`, SIGTERM/SIGINT/SIGHUP) also restores normal sleep, so removing
-// Sleepless can never leave the Mac unable to sleep with no app running to turn it off.
+// logout, SIGTERM/SIGINT/SIGHUP) also restores normal sleep when the scoped grant is
+// available. The uninstall flows independently verify sleep before removing the app.
 //
 // UI: clicking the menu-bar coffee cup opens a small native popover with an NSSwitch
 // toggle (the System-Settings control), a state caption, an auto-off timer, the
-// battery-floor slider, a Launch-at-login switch, and Quit. The menu-bar glyph also
+// battery-floor slider, a Launch-at-login switch, Uninstall, and Quit. The menu-bar glyph also
 // shows state at a glance.
 //
 // The coffee-cup metaphor is literal: an EMPTY cup means the Mac sleeps normally, a
@@ -24,7 +24,7 @@
 //
 // Three small, fail-safe features layer on top, none of which adds a daemon or
 // persists OS state (so "reboot resets it" still holds):
-//   1. Auto-off timer (1h / 2h / custom up to 24h) — a one-shot in-memory Timer that flips sleep back
+//   1. Auto-off timer (1h / 2h / 8h / custom up to 24h) — a one-shot in-memory Timer that flips sleep back
 //      on when it fires. Dies on quit; nothing survives a reboot.
 //   2. Launch at login (SMAppService.mainApp) — OFF by default. The app always
 //      launches reading the TRUE system state, so a login launch can never
@@ -185,7 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var userForcedOn = false   // user deliberately turned it on; honor over the Low Power Mode auto-off (the hard battery floor still wins)
 
     // Auto-off timer (in-memory; dies on quit, never survives a reboot)
-    private var autoOffMinutes = 0           // 0 = none (stay on until off), 60, 120, or customMinutes
+    private var autoOffMinutes = 0           // 0 = none, 60, 120, 480, or customMinutes
     private var customMinutes = customDefault
     private var keepAwakeTimer: Timer?       // one-shot: flips sleep back on when it fires
     private var countdownTicker: Timer?      // 1 Hz label refresh, only while the popover is open
@@ -324,21 +324,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         captionLabel.cell?.wraps = true
         g1.addSubview(captionLabel)
 
-        // GROUP 2 — auto-off timer (label + segmented [Off | 1h | 2h | Custom] + optional
+        // GROUP 2 — auto-off timer (label + segmented [Off | 1h | 2h | 8h | Custom] + optional
         // custom-duration row + countdown)
         let g2y = g1y + g1h + 12, g2h: CGFloat = 106
         let g2 = makeCard(NSRect(x: pad, y: g2y, width: contentW, height: g2h))
         timerCard = g2
         let timerLabel = makeLabel("Auto-off timer", font: .systemFont(ofSize: 13), color: .labelColor)
-        timerLabel.frame = NSRect(x: ci, y: ci, width: cw, height: 22)   // own row: 4 segments need the full width
+        timerLabel.frame = NSRect(x: ci, y: ci, width: cw, height: 22)   // label gets its own row
         g2.addSubview(timerLabel)
-        autoOffControl = NSSegmentedControl(labels: ["Off", "1h", "2h", "Custom"],
+        autoOffControl = NSSegmentedControl(labels: ["Off", "1h", "2h", "8h", "Custom"],
                                             trackingMode: .selectOne,
                                             target: self, action: #selector(autoOffChanged(_:)))
         autoOffControl.selectedSegment = 0
         autoOffControl.controlSize = .regular
         autoOffControl.segmentStyle = .automatic
-        autoOffControl.segmentDistribution = .fillEqually
+        autoOffControl.segmentDistribution = .fillProportionally
         autoOffControl.frame = NSRect(x: ci, y: ci + 28, width: cw, height: 24)
         g2.addSubview(autoOffControl)
         // Custom duration: [ H ]⇅ h  [ MM ]⇅ m. Applies immediately; hidden unless "Custom".
@@ -419,7 +419,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loginSwitch.frame = NSRect(x: contentW - ci - swW, y: ci + (22 - swH) / 2, width: swW, height: swH)
         g4.addSubview(loginSwitch)
 
-        // Footer — Quit (separated by space, not a hairline)
+        // Footer — complete removal and ordinary Quit.
+        let uninstall = NSButton(title: "Uninstall…", target: self, action: #selector(uninstall))
+        uninstall.toolTip = "Restores normal sleep and removes Sleepless and its setup."
+        uninstall.bezelStyle = .rounded
+        uninstall.sizeToFit()
+        uninstall.frame.origin = NSPoint(x: pad, y: g4y + g4h + 12)
+        root.addSubview(uninstall)
         let quit = NSButton(title: "Quit Sleepless", target: self, action: #selector(quit))
         quit.toolTip = "Quits Sleepless and restores normal sleep."
         quit.controlSize = .regular
@@ -429,7 +435,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quit.frame = NSRect(x: W - pad - qs.width, y: g4y + g4h + 12, width: qs.width, height: qs.height)
         root.addSubview(quit)
         rootView = root
-        belowTimerViews = [g3, g4, quit]
+        belowTimerViews = [g3, g4, uninstall, quit]
 
         let vc = NSViewController()
         vc.view = root
@@ -562,10 +568,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch sender.selectedSegment {
         case 1: autoOffMinutes = 60
         case 2: autoOffMinutes = 120
-        case 3: autoOffMinutes = customMinutes
+        case 3: autoOffMinutes = 480
+        case 4: autoOffMinutes = customMinutes
         default: autoOffMinutes = 0
         }
-        layoutTimerCard(showCustom: sender.selectedSegment == 3)
+        layoutTimerCard(showCustom: sender.selectedSegment == 4)
         if isOn, autoOffMinutes > 0 {
             startKeepAwakeTimer(minutes: autoOffMinutes)
         } else {
@@ -617,7 +624,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard total != customMinutes else { return }
         customMinutes = total
         UserDefaults.standard.set(total, forKey: customKey)
-        guard autoOffControl?.selectedSegment == 3 else { return }
+        guard autoOffControl?.selectedSegment == 4 else { return }
         autoOffMinutes = total
         if isOn { startKeepAwakeTimer(minutes: total) }   // restart the countdown at the new length
     }
@@ -851,6 +858,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
+    @objc private func uninstall() {
+        closePopover()
+        let alert = NSAlert()
+        alert.messageText = "Uninstall Sleepless?"
+        alert.informativeText = "Restore normal sleep and remove the app, Launch at login, the permission grant, and preferences. Terminal will open to show progress and may ask for your administrator password."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Uninstall")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+
+        let fm = FileManager.default
+        let staging = fm.temporaryDirectory.appendingPathComponent("Sleepless-uninstall-" + UUID().uuidString, isDirectory: true)
+        do {
+            guard let source = Bundle.main.url(forResource: "uninstall", withExtension: "sh") else {
+                throw NSError(domain: "Sleepless", code: 1, userInfo: [NSLocalizedDescriptionKey: "The bundled uninstaller is missing."])
+            }
+            try fm.createDirectory(at: staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let script = staging.appendingPathComponent("uninstall.sh")
+            try fm.copyItem(at: source, to: script)
+            // Terminal owns the job so quitting/deleting this app cannot stop it. Both
+            // shell arguments and the enclosing AppleScript string need separate quoting.
+            let command = "/bin/bash \(shellQuote(script.path)) --app \(shellQuote(Bundle.main.bundlePath)) --yes; /bin/rm -f \(shellQuote(script.path)); /bin/rmdir \(shellQuote(staging.path))"
+            let literal = command.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            let scriptText = "tell application \"Terminal\"\nactivate\ndo script \"\(literal)\"\nend tell"
+            var error: NSDictionary?
+            guard let appleScript = NSAppleScript(source: scriptText) else {
+                throw NSError(domain: "Sleepless", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not prepare the Terminal command."])
+            }
+            appleScript.executeAndReturnError(&error)
+            if let error {
+                throw NSError(domain: "Sleepless", code: 3, userInfo: [NSLocalizedDescriptionKey: error[NSAppleScript.errorMessage] as? String ?? "Terminal did not accept the uninstall command."])
+            }
+            NSApp.terminate(nil)
+        } catch {
+            try? fm.removeItem(at: staging)
+            let failure = NSAlert()
+            failure.messageText = "Uninstall could not start"
+            failure.informativeText = error.localizedDescription
+            failure.runModal()
+        }
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     @objc private func quit() { NSApp.terminate(nil) }
 }
 
@@ -858,6 +912,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 enum SleeplessApp {
     @MainActor
     static func main() {
+        if CommandLine.arguments.dropFirst() == ["--unregister-login-item"] {
+            do {
+                if SMAppService.mainApp.status != .notRegistered {
+                    try SMAppService.mainApp.unregister()
+                }
+                guard SMAppService.mainApp.status != .enabled else {
+                    fputs("Sleepless: Launch at login is still enabled.\n", stderr)
+                    exit(1)
+                }
+                print("Launch at login is disabled.")
+                exit(0)
+            } catch {
+                fputs("Sleepless: could not disable Launch at login: \(error.localizedDescription)\n", stderr)
+                exit(1)
+            }
+        }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate

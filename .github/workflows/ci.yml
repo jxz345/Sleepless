@@ -37,6 +37,11 @@ jobs:
           fi
           file /tmp/Sleepless
 
+      - name: Uninstaller safety checks
+        run: |
+          /bin/bash -n uninstall.sh
+          /bin/bash tests/uninstall_test.sh
+
       - name: Assemble app bundle
         run: |
           set -euo pipefail

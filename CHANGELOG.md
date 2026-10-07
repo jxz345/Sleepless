@@ -22,7 +22,14 @@ releases. See [UPDATE_NOTES.md](https://github.com/jxz345/Sleepless/blob/main/UP
   passwordless grant too.
 
 ### Added
-- Custom auto-off timer length. The timer now offers **Off · 1h · 2h · Custom**; choosing
+- **Uninstall…** button with confirmation and visible Terminal progress. Complete removal
+  verifies normal sleep, unregisters Launch at login, and removes the app, permission grant,
+  and preferences. Homebrew installations are removed through their matching cask receipt.
+  One initial administrator authentication authorizes cleanup; subsequent privileged steps
+  are noninteractive. The button avoids Homebrew's separate `--zap` password request.
+- Uninstall safety checks stop removal when sleep cannot be restored or verified; Homebrew's
+  independent backstop also covers a stopped or crashed app.
+- Custom auto-off timer length. The timer now offers **Off · 1h · 2h · 8h · Custom**; choosing
   Custom reveals an hours + minutes row (with steppers) where you can set any length from
   1 minute to 24 hours. Changes apply immediately and restart a running countdown. The
   last custom length is remembered, but the timer itself is still never re-armed on launch.
@@ -45,8 +52,8 @@ releases. See [UPDATE_NOTES.md](https://github.com/jxz345/Sleepless/blob/main/UP
   position, automatic re-creation if the system drops it, and a state pulse that no longer
   touches the button's layer. Based on upstream PRs #1 (Farnood Faraji) and #5 (g150446).
 
-This replacement publication retains version `1.2.7-jxz.1` and its application code, with
-corrected installation documentation and rebuilt release assets. To refresh a cached copy
+This replacement publication retains version `1.2.7-jxz.1`, adding complete uninstall,
+the 8-hour timer preset, and installation documentation. To refresh a cached copy
 of this version before reinstalling, run `brew fetch --force --cask jxz345/tap/sleepless`
 after updating the tap. Use the replacement release's `SHA256SUMS` for verification.
 
