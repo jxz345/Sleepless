@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Adjustable auto-off presets. Right-click (or Control-click) the timer control to set each of
+  the three presets to a whole number of hours from 1 to 24 (defaults 1h, 2h, 8h). Changes
+  apply immediately, are remembered across launches, and restart a running countdown if that
+  preset is selected.
+
 ## [1.2.7-jxz.1] - 2026-10-07
 
 Fork release ([jxz345/Sleepless](https://github.com/jxz345/Sleepless)) built on upstream

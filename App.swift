@@ -24,7 +24,8 @@
 //
 // Three small, fail-safe features layer on top, none of which adds a daemon or
 // persists OS state (so "reboot resets it" still holds):
-//   1. Auto-off timer (1h / 2h / 8h / custom up to 24h) — a one-shot in-memory Timer that flips sleep back
+//   1. Auto-off timer (three presets, default 1h / 2h / 8h, each adjustable 1–24h via right-click;
+//      or custom up to 24h) — a one-shot in-memory Timer that flips sleep back
 //      on when it fires. Dies on quit; nothing survives a reboot.
 //   2. Launch at login (SMAppService.mainApp) — OFF by default. The app always
 //      launches reading the TRUE system state, so a login launch can never
@@ -52,6 +53,11 @@ private let customKey = "customAutoOffMinutes"
 private let customDefault = 90
 private let customMin = 1
 private let customMax = 24 * 60
+// Auto-off presets (whole hours; right-click the timer control to change them).
+private let presetKey = "autoOffPresetHours"
+private let presetDefaults = [1, 2, 8]
+private let presetMin = 1
+private let presetMax = 24
 
 // MARK: - Menu-bar coffee glyph (native SF Symbols, MONOCHROME template — state by SHAPE)
 // macOS convention: a menu-bar extra is a template image (no colour) so it adapts to light/dark
@@ -116,6 +122,17 @@ private func makeCupGlyph(_ glyph: SleepGlyph) -> NSImage {
 // Flipped container so popover content lays out top-down with simple frames.
 private final class FlippedView: NSView { override var isFlipped: Bool { true } }
 
+// Segmented control that reports a right-click (or Control-click) instead of selecting a segment.
+private final class PresetSegmentedControl: NSSegmentedControl {
+    var onSecondaryClick: (() -> Void)?
+    override func rightMouseDown(with event: NSEvent) {
+        if let f = onSecondaryClick { f() } else { super.rightMouseDown(with: event) }
+    }
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control), let f = onSecondaryClick { f() } else { super.mouseDown(with: event) }
+    }
+}
+
 // Brand accent (2026 "Liquid Glass" redesign): indigo -> violet -> fuchsia. The
 // violet mid-tone is the single accent the popover uses to communicate the
 // privileged "awake" state, matching the app icon's gradient mid-stop. These are
@@ -161,7 +178,7 @@ private final class CardView: NSView {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
     private var timer: Timer?
     private let onGlyph = makeCupGlyph(.on)
@@ -176,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var captionLabel: NSTextField!
     private var floorValueLabel: NSTextField!
     private var floorSlider: NSSlider!
-    private var autoOffControl: NSSegmentedControl!
+    private var autoOffControl: PresetSegmentedControl!
     private var countdownLabel: NSTextField!
     private var loginSwitch: NSSwitch!
     private var clickMonitor: Any?
@@ -185,8 +202,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var userForcedOn = false   // user deliberately turned it on; honor over the Low Power Mode auto-off (the hard battery floor still wins)
 
     // Auto-off timer (in-memory; dies on quit, never survives a reboot)
-    private var autoOffMinutes = 0           // 0 = none, 60, 120, 480, or customMinutes
+    private var autoOffMinutes = 0           // 0 = none, a preset (presetHours * 60), or customMinutes
     private var customMinutes = customDefault
+    private var presetHours = presetDefaults
     private var keepAwakeTimer: Timer?       // one-shot: flips sleep back on when it fires
     private var countdownTicker: Timer?      // 1 Hz label refresh, only while the popover is open
     private var timerEndDate: Date?
@@ -202,6 +220,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timerCard: CardView!
     private var belowTimerViews: [NSView] = []
     private var customRowShown = false
+    // Preset editor (small transient popover opened by right-clicking the timer control)
+    private let presetPopover = NSPopover()
+    private var presetFields: [NSTextField] = []
+    private var presetSteppers: [NSStepper] = []
 
     private let popoverWidth: CGFloat = 320
     private let popoverHeight: CGFloat = 460
@@ -211,6 +233,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         batteryFloorPercent = min(max((UserDefaults.standard.object(forKey: floorKey) as? Int) ?? floorDefault, floorMin), floorMax)
         customMinutes = min(max((UserDefaults.standard.object(forKey: customKey) as? Int) ?? customDefault, customMin), customMax)
+        if let saved = UserDefaults.standard.array(forKey: presetKey) as? [Int], saved.count == presetDefaults.count {
+            presetHours = saved.map { min(max($0, presetMin), presetMax) }
+        }
         createStatusItem()
         popover.behavior = .applicationDefined   // app-managed dismissal (no transient close/reopen flicker)
         popover.animates = true
@@ -324,7 +349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         captionLabel.cell?.wraps = true
         g1.addSubview(captionLabel)
 
-        // GROUP 2 — auto-off timer (label + segmented [Off | 1h | 2h | 8h | Custom] + optional
+        // GROUP 2 — auto-off timer (label + segmented [Off | preset ×3 | Custom] + optional
         // custom-duration row + countdown)
         let g2y = g1y + g1h + 12, g2h: CGFloat = 106
         let g2 = makeCard(NSRect(x: pad, y: g2y, width: contentW, height: g2h))
@@ -332,9 +357,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let timerLabel = makeLabel("Auto-off timer", font: .systemFont(ofSize: 13), color: .labelColor)
         timerLabel.frame = NSRect(x: ci, y: ci, width: cw, height: 22)   // label gets its own row
         g2.addSubview(timerLabel)
-        autoOffControl = NSSegmentedControl(labels: ["Off", "1h", "2h", "8h", "Custom"],
-                                            trackingMode: .selectOne,
-                                            target: self, action: #selector(autoOffChanged(_:)))
+        autoOffControl = PresetSegmentedControl(labels: ["Off"] + presetHours.map { "\($0)h" } + ["Custom"],
+                                                trackingMode: .selectOne,
+                                                target: self, action: #selector(autoOffChanged(_:)))
+        autoOffControl.toolTip = "Right-click to change the preset lengths."
+        autoOffControl.onSecondaryClick = { [weak self] in self?.showPresetEditor() }
         autoOffControl.selectedSegment = 0
         autoOffControl.controlSize = .regular
         autoOffControl.segmentStyle = .automatic
@@ -346,23 +373,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         row.isHidden = true
         customRow = row
         func makeNumberField(x: CGFloat) -> NSTextField {
-            let f = NSTextField(frame: NSRect(x: x, y: 0, width: 40, height: 22))
-            f.alignment = .right
-            f.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
-            f.target = self
-            f.action = #selector(customDurationChanged(_:))
-            f.cell?.sendsActionOnEndEditing = true   // commit on Tab / click-away, not only Enter
-            row.addSubview(f)
-            return f
+            numberField(in: row, x: x, action: #selector(customDurationChanged(_:)))
         }
         func makeStepper(x: CGFloat, min: Double, max: Double, increment: Double) -> NSStepper {
-            let s = NSStepper(frame: NSRect(x: x, y: 0, width: 15, height: 22))
-            s.minValue = min; s.maxValue = max; s.increment = increment
-            s.valueWraps = false
-            s.target = self
-            s.action = #selector(customDurationChanged(_:))
-            row.addSubview(s)
-            return s
+            stepper(in: row, x: x, min: min, max: max, increment: increment, action: #selector(customDurationChanged(_:)))
         }
         let unitFont = NSFont.systemFont(ofSize: 13)
         hoursField = makeNumberField(x: 0)
@@ -442,6 +456,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return vc
     }
 
+    // Number field + stepper shared by the custom-duration row and the preset editor.
+    private func numberField(in parent: NSView, x: CGFloat, action: Selector) -> NSTextField {
+        let f = NSTextField(frame: NSRect(x: x, y: 0, width: 40, height: 22))
+        f.alignment = .right
+        f.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        f.target = self
+        f.action = action
+        f.cell?.sendsActionOnEndEditing = true   // commit on Tab / click-away, not only Enter
+        parent.addSubview(f)
+        return f
+    }
+
+    private func stepper(in parent: NSView, x: CGFloat, min: Double, max: Double, increment: Double,
+                         action: Selector) -> NSStepper {
+        let s = NSStepper(frame: NSRect(x: x, y: 0, width: 15, height: 22))
+        s.minValue = min; s.maxValue = max; s.increment = increment
+        s.valueWraps = false
+        s.target = self
+        s.action = action
+        parent.addSubview(s)
+        return s
+    }
+
     private func makeLabel(_ s: String, font: NSFont, color: NSColor) -> NSTextField {
         let t = NSTextField(labelWithString: s)
         t.font = font
@@ -473,12 +510,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func closePopover() {
+        commitPendingEdits()
+        presetPopover.performClose(nil)
         popover.performClose(nil)
         countdownTicker?.invalidate(); countdownTicker = nil   // stop the 1 Hz label refresh (keep-awake timer keeps running)
         if let monitor = clickMonitor { NSEvent.removeMonitor(monitor); clickMonitor = nil }
     }
 
     @objc private func switchToggled(_ sender: NSSwitch) {
+        commitPendingEdits()
         if performToggle(wantOn: sender.state == .on) {
             sender.state = .off   // setup needed / failed: reflect reality (performToggle notified)
         }
@@ -565,10 +605,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Auto-off timer (Feature 1)
     @objc private func autoOffChanged(_ sender: NSSegmentedControl) {
+        commitPendingEdits()
         switch sender.selectedSegment {
-        case 1: autoOffMinutes = 60
-        case 2: autoOffMinutes = 120
-        case 3: autoOffMinutes = 480
+        case 1...3: autoOffMinutes = presetHours[sender.selectedSegment - 1] * 60
         case 4: autoOffMinutes = customMinutes
         default: autoOffMinutes = 0
         }
@@ -608,6 +647,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         notify("Auto-off timer ended. Sleepless turned off.")
     }
 
+    // End any in-progress text edit so its action (sendsActionOnEndEditing) commits the typed value
+    // before a control reads customMinutes / presetHours. Switches and segmented controls don't take
+    // first responder, so clicking them would otherwise leave the edit uncommitted.
+    // Only visible windows: resigning a field editor in a closed popover's window raises an
+    // AppKit exception, which would abort the calling action (e.g. the keep-awake switch).
+    private func commitPendingEdits() {
+        for w in [popover.contentViewController?.view.window, presetPopover.contentViewController?.view.window] {
+            if let w, w.isVisible, w.firstResponder is NSTextView { w.makeFirstResponder(nil) }
+        }
+    }
+
+    // The preset editor opens with its first field focused; commit that edit while the editor is
+    // still on screen, so a closed editor never keeps a live field editor behind.
+    func popoverWillClose(_ notification: Notification) {
+        guard (notification.object as? NSPopover) === presetPopover,
+              let w = presetPopover.contentViewController?.view.window,
+              w.firstResponder is NSTextView else { return }
+        w.makeFirstResponder(nil)
+    }
+
     // Custom duration edited (field commit or stepper click). Everything is reduced to a single
     // total in minutes, clamped to [customMin, customMax], then redistributed into h + m — so the
     // minutes stepper's -5 / 60 sentinels carry into the hours, and junk input reverts.
@@ -635,6 +694,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         minutesField?.stringValue = String(format: "%02d", t % 60)
         hoursStepper?.integerValue = t / 60
         minutesStepper?.integerValue = t % 60
+    }
+
+    // MARK: Preset editor — [ H ]⇅ h ×3 in a small popover under the timer control. Applies immediately.
+    private func showPresetEditor() {
+        if presetPopover.isShown { presetPopover.performClose(nil); return }
+        if presetFields.isEmpty {
+            let pad: CGFloat = 12, slot: CGFloat = 84
+            let root = FlippedView(frame: NSRect(x: 0, y: 0, width: pad * 2 + slot * 3 - 12, height: 22 + pad * 2))
+            for i in presetHours.indices {
+                let cell = FlippedView(frame: NSRect(x: pad + CGFloat(i) * slot, y: pad, width: slot - 12, height: 22))
+                presetFields.append(numberField(in: cell, x: 0, action: #selector(presetChanged(_:))))
+                presetSteppers.append(stepper(in: cell, x: 42, min: Double(presetMin), max: Double(presetMax),
+                                              increment: 1, action: #selector(presetChanged(_:))))
+                let h = makeLabel("h", font: .systemFont(ofSize: 13), color: .secondaryLabelColor)
+                h.frame = NSRect(x: 60, y: 2, width: 16, height: 18)
+                cell.addSubview(h)
+                root.addSubview(cell)
+            }
+            let vc = NSViewController()
+            vc.view = root
+            presetPopover.contentViewController = vc
+            presetPopover.contentSize = root.frame.size
+            presetPopover.behavior = .transient
+            presetPopover.delegate = self
+        }
+        renderPresets()
+        presetPopover.show(relativeTo: autoOffControl.bounds, of: autoOffControl, preferredEdge: .maxY)
+    }
+
+    // A preset edited (field commit or stepper click): whole hours, clamped to [presetMin, presetMax];
+    // junk input reverts. If that preset is the active selection, the countdown restarts at the new length.
+    @objc private func presetChanged(_ sender: Any) {
+        var i = 0, h = 0
+        if let s = sender as? NSStepper, let idx = presetSteppers.firstIndex(where: { $0 === s }) {
+            i = idx; h = s.integerValue
+        } else if let f = sender as? NSTextField, let idx = presetFields.firstIndex(where: { $0 === f }) {
+            i = idx
+            h = Int(f.stringValue.trimmingCharacters(in: .whitespaces)).flatMap { $0 >= 0 ? $0 : nil } ?? presetHours[idx]
+        } else { return }
+        h = min(max(h, presetMin), presetMax)
+        let changed = h != presetHours[i]
+        presetHours[i] = h
+        renderPresets()
+        guard changed else { return }
+        UserDefaults.standard.set(presetHours, forKey: presetKey)
+        guard autoOffControl?.selectedSegment == i + 1 else { return }
+        autoOffMinutes = h * 60
+        if isOn { startKeepAwakeTimer(minutes: autoOffMinutes) }
+    }
+
+    private func renderPresets() {
+        for (i, h) in presetHours.enumerated() {
+            autoOffControl?.setLabel("\(h)h", forSegment: i + 1)
+            if i < presetFields.count {
+                presetFields[i].stringValue = "\(h)"
+                presetSteppers[i].integerValue = h
+            }
+        }
     }
 
     // Show/hide the custom row: grow/shrink the timer card, push the cards below it, and resize

@@ -412,3 +412,23 @@ popover. Selecting a preset while on restarts its countdown; relaunch still defa
   contained exactly **one** password prompt and ended with successful cleanup. Independent
   checks confirmed that the app, grant, preferences, legacy login plist, and Homebrew receipt
   were absent and `SleepDisabled` was `0`.
+
+---
+
+## 10. Adjustable presets (2026-10-12)
+
+**Request:** let users set the three preset lengths, as whole hours from 1 to 24.
+
+- **Access:** right-click (or Control-click) the segmented control. A 24-item menu would mean
+  scrolling, so it opens a small transient popover below the control instead:
+  `[ H ]⇅h  [ H ]⇅h  [ H ]⇅h`, built with the same field + stepper helpers as the Custom row.
+- **Why all three at once:** `NSSegmentedControl` has no public "segment at point" API, and the
+  segments use proportional widths, so the editor doesn't try to work out which segment was clicked.
+- **Storage:** `autoOffPresetHours` (an `[Int]` in UserDefaults). A value with the wrong count
+  falls back to `[1, 2, 8]`; each entry is clamped to 1–24. Uninstall already deletes the whole
+  preferences domain.
+- **Semantics:** edits apply immediately; junk or negative input reverts; 0 → 1, 30 → 24.
+  Duplicates are allowed and presets are never re-sorted, so the selected segment never moves.
+  Editing the selected preset while keep-awake is on restarts the countdown at the new length.
+  The timer still starts Off on relaunch.
+

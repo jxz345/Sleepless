@@ -47,7 +47,7 @@
 > **This is a fork** of [Aboudjem/Sleepless](https://github.com/Aboudjem/Sleepless), released as `<upstream version>-jxz.<n>` (currently **1.2.7-jxz.1**) so it never collides with upstream releases. The translated READMEs describe upstream. Background, findings and design decisions: **[UPDATE_NOTES.md](UPDATE_NOTES.md)**.
 >
 > **What's different in this fork**
-> - **Custom auto-off timer:** choose **Off · 1h · 2h · 8h · Custom**, and set any length from 1 minute to 24 hours with an hours + minutes row.
+> - **Custom auto-off timer:** choose **Off · 1h · 2h · 8h · Custom**, and set any length from 1 minute to 24 hours with an hours + minutes row. Right-click the timer control to change the three presets (whole hours, 1–24).
 > - **Quitting or uninstalling restores normal sleep.** Upstream left `disablesleep` on when the app was quit or deleted, so the Mac would not sleep until a reboot. Now the Quit button, logout, `kill`/`killall`, and `brew uninstall` all turn it off.
 > - **Steadier menu-bar icon:** it keeps the same width in every state and recovers if macOS drops it (upstream PRs [#1](https://github.com/Aboudjem/Sleepless/pull/1) and [#5](https://github.com/Aboudjem/Sleepless/pull/5)).
 
@@ -115,7 +115,7 @@ Restoring sleep clears Sleepless's `disablesleep` override; your existing macOS 
 | | | |
 |---|---|---|
 | ☕ | **One switch** | Click the menu-bar cup, flip the toggle. |
-| ⏲️ | **Auto-off timer** | 1h, 2h, 8h, or any custom length up to 24h, with a live countdown, then off. |
+| ⏲️ | **Auto-off timer** | Three presets (1h, 2h, 8h by default; right-click to change, 1–24h), or any custom length up to 24h, with a live countdown, then off. |
 | 🔋 | **Battery floor** | Auto-off at 5–50% on battery (default 15%). |
 | 🪫 | **Low Power Mode** | Steps aside when LPM is on, on battery. |
 | 🖥️ | **No dongle** | Lid closed, on battery. No monitor, no HDMI plug. |
