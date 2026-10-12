@@ -44,7 +44,7 @@
 > A closed lid sleeps your Mac, and `caffeinate` apps (KeepingYouAwake and friends) can't change that, by design. Sleepless flips the one setting that can, `pmset disablesleep`, with safety nets so it is safe to forget.
 
 > [!IMPORTANT]
-> **This is a fork** of [Aboudjem/Sleepless](https://github.com/Aboudjem/Sleepless), released as `<upstream version>-jxz.<n>` (currently **1.2.7-jxz.1**) so it never collides with upstream releases. The translated READMEs describe upstream. Background, findings and design decisions: **[UPDATE_NOTES.md](UPDATE_NOTES.md)**.
+> **This is a fork** of [Aboudjem/Sleepless](https://github.com/Aboudjem/Sleepless), released as `<upstream version>-jxz.<n>` (currently **1.2.7-jxz.2**) so it never collides with upstream releases. The translated READMEs describe upstream. Background, findings and design decisions: **[UPDATE_NOTES.md](UPDATE_NOTES.md)**.
 >
 > **What's different in this fork**
 > - **Custom auto-off timer:** choose **Off · 1h · 2h · 8h · Custom**, and set any length from 1 minute to 24 hours with an hours + minutes row. Right-click the timer control to change the three presets (whole hours, 1–24).

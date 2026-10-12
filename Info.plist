@@ -8,8 +8,8 @@
     <key>CFBundleDisplayName</key>         <string>Sleepless</string>
     <key>CFBundlePackageType</key>         <string>APPL</string>
     <key>CFBundleIconFile</key>            <string>Sleepless</string>
-    <key>CFBundleShortVersionString</key>  <string>1.2.7-jxz.1</string>
-    <key>CFBundleVersion</key>             <string>1.2.7-jxz.1</string>
+    <key>CFBundleShortVersionString</key>  <string>1.2.7-jxz.2</string>
+    <key>CFBundleVersion</key>             <string>1.2.7-jxz.2</string>
     <key>LSMinimumSystemVersion</key>      <string>26.0</string>
     <key>LSUIElement</key>                 <true/>
     <key>NSAppleEventsUsageDescription</key><string>Sleepless opens Terminal to run its uninstaller and show administrator password prompts.</string>

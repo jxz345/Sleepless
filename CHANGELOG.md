@@ -7,11 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.7-jxz.2] - 2026-10-12
+
 ### Added
 - Adjustable auto-off presets. Right-click (or Control-click) the timer control to set each of
   the three presets to a whole number of hours from 1 to 24 (defaults 1h, 2h, 8h). Changes
   apply immediately, are remembered across launches, and restart a running countdown if that
   preset is selected.
+
+### Fixed
+- A value typed into the Custom timer fields (or a preset field) is now used even without
+  pressing Enter or Tab. Previously, clicking the keep-awake switch or a timer segment right
+  after typing started the timer with the old length.
 
 ## [1.2.7-jxz.1] - 2026-10-07
 
