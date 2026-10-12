@@ -83,12 +83,26 @@ stop_app() {
     done
 }
 
+# The optional background service goes first, so it cannot keep the Mac awake for a handed-off
+# timer while the app is stopped and normal sleep is restored below.
+remove_service() {
+    echo "==> Removing the background service"
+    if run /bin/launchctl print "system/$SERVICE_LABEL" >/dev/null 2>&1; then
+        run /usr/bin/sudo -n /bin/launchctl bootout "system/$SERVICE_LABEL" || return 1
+    fi
+    run /usr/bin/sudo -n /bin/launchctl enable "system/$SERVICE_LABEL" || true   # clear a Stop override
+    run /usr/bin/sudo -n /bin/rm -f "$SERVICE_PLIST" || return 1
+    run /usr/bin/sudo -n /bin/rm -rf "$SERVICE_DIR" || return 1
+    run /bin/rm -f "$TIMER_STATE" "$SERVICE_OPT_OUT" || return 1
+}
+
 remove_setup() {
     echo "==> Disabling Launch at login"
     run "$APP/Contents/MacOS/Sleepless" --unregister-login-item || return 1
     if run /bin/launchctl print "gui/$USER_ID/$BUNDLE_ID" >/dev/null 2>&1; then
         run /bin/launchctl bootout "gui/$USER_ID/$BUNDLE_ID" || return 1
     fi
+    remove_service || return 1
     stop_app || return 1
     restore_sleep || return 1
     run /bin/rm -f "$LAUNCH_AGENT" || return 1
@@ -111,7 +125,8 @@ remove_setup() {
     fi
     run /bin/rm -f "$PREFERENCES" || return 1
     run /usr/bin/sudo -n /usr/sbin/visudo -c || return 1
-    [ ! -e "$APP" ] && [ ! -e "$SUDOERS_DST" ] && [ ! -e "$LAUNCH_AGENT" ] && [ ! -e "$PREFERENCES" ] || {
+    [ ! -e "$APP" ] && [ ! -e "$SUDOERS_DST" ] && [ ! -e "$LAUNCH_AGENT" ] && [ ! -e "$PREFERENCES" ] &&
+        [ ! -e "$SERVICE_PLIST" ] && [ ! -e "$SERVICE_DIR" ] && [ ! -e "$TIMER_STATE" ] && [ ! -e "$SERVICE_OPT_OUT" ] || {
         fail "Some Sleepless files remain. Review the errors above."; return 1;
     }
     [ "$(sleep_state)" = 0 ] || { fail "The final sleep setting could not be verified."; return 1; }
@@ -125,6 +140,11 @@ uninstall_main() {
     [ "$USER_ID" != 0 ] || { fail "Run this as your normal user, without sudo. It requests authentication when needed."; return 1; }
     LAUNCH_AGENT="$HOME/Library/LaunchAgents/$BUNDLE_ID.plist"
     PREFERENCES="$HOME/Library/Preferences/$BUNDLE_ID.plist"
+    SERVICE_LABEL="$BUNDLE_ID.timer"
+    SERVICE_PLIST="/Library/LaunchDaemons/$SERVICE_LABEL.plist"
+    SERVICE_DIR="/Library/Application Support/Sleepless"
+    TIMER_STATE="$HOME/Library/Application Support/Sleepless/timer"
+    SERVICE_OPT_OUT="$HOME/Library/Application Support/Sleepless/service-off"
     local confirmed=0 reply
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -136,7 +156,7 @@ uninstall_main() {
     validate_app || return 1
     find_brew_owner || return 1
     echo "Sleepless complete uninstall"
-    echo "Restores normal sleep and removes the app, login item, permission grant, and preferences."
+    echo "Restores normal sleep and removes the app, login item, background service, permission grant, and preferences."
     if [ "$confirmed" != 1 ]; then
         read -r -p "Continue? [y/N] " reply || return 1
         case "$reply" in y|Y|yes|YES) ;; *) echo "Cancelled. Nothing removed."; return 1 ;; esac

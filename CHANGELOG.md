@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.7-jxz.3] - 2026-10-12
+
+### Added
+- The auto-off timer shows its end time next to the countdown (`Auto-off in 1:23:45 · ends 14:30`).
+- Energy Mode follows Sleepless: High Power while it keeps the Mac awake, Automatic when it
+  turns off. Set only on state changes.
+- Optional **Background service** (a root LaunchDaemon, `com.aboudjem.Sleepless.timer`) so a
+  running auto-off timer survives screen lock, logout, and restart, including a restart
+  nobody logs in after. Managed from a new popover card that always shows its status, with
+  an install/remove switch and **Start / Stop / Restart**. Stop turns everything off. The
+  service also enforces the battery floor while you're logged out.
+- A running timer resumes after the app relaunches, and is re-applied if the app starts
+  before the service after a restart.
+- Homebrew sets up the permission grant and the background service at install and upgrade
+  with one password prompt (running the bundled scripts with `/bin/bash`). Upgrades skip the
+  service if you turned it off in the popover.
+
+### Changed
+- **Quit** moved from the popover footer to the menu-bar cup's right-click menu. With the
+  background service running and a timer active, quitting hands the timer to the service.
+- **Launch at login** is merged into the Background service: the service opens Sleepless at
+  login. A login item from the old switch is removed when the service isn't installed.
+- The permission grant now also covers the Energy Mode and background-service commands,
+  including two fixed-path commands that let Homebrew remove the service without a password.
+- `brew uninstall` removes the background service; **Uninstall…** removes it and goes through
+  Homebrew for Homebrew installs, with one password prompt.
+- `install.sh` no longer adds its own login item.
+
 ## [1.2.7-jxz.2] - 2026-10-12
 
 ### Added

@@ -40,11 +40,26 @@ tightly scoped `/etc/sudoers.d` drop-in. `install.sh` writes this (with your use
 substituted for `__USER__`), owned `root:wheel`, mode `0440`:
 
 ```
-<you> ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1
+<you> ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1,
+    /usr/bin/pmset -a powermode 2, /usr/bin/pmset -a powermode 0,
+    /bin/launchctl enable system/com.aboudjem.Sleepless.timer,
+    /bin/launchctl disable system/com.aboudjem.Sleepless.timer,
+    /bin/launchctl bootstrap system /Library/LaunchDaemons/com.aboudjem.Sleepless.timer.plist,
+    /bin/launchctl bootout system/com.aboudjem.Sleepless.timer,
+    /bin/launchctl kickstart -k system/com.aboudjem.Sleepless.timer,
+    /bin/rm -f /Library/LaunchDaemons/com.aboudjem.Sleepless.timer.plist,
+    /bin/rm -rf /Library/Application\ Support/Sleepless
 ```
+(one line in the real file; see `sleepless.sudoers.template`)
 
-**This grant lets one user run, as root, exactly two fully-specified commands and nothing
-else.** sudoers matches command arguments *literally* — and this rule contains **no
+**This grant lets one user run, as root, exactly these fully-specified commands and nothing
+else:** flip lid-close sleep, set Energy Mode (High Power, or Automatic), and start, stop,
+restart, or remove Sleepless's own background service. The `launchctl` commands name one
+fixed label and one root-owned plist, so they cannot load or stop anything else. The two
+`rm` commands name only the service's own files; they exist so `brew uninstall` and upgrades
+can remove the service without a password (Homebrew's own `launchctl`/`delete` steps always
+prompt). Arguments must match exactly, so `rm -rf /Library/Application Support` or any other
+path is not covered. sudoers matches command arguments *literally* — and this rule contains **no
 wildcards** — so the match is total. From the sudoers manual: *"If a Cmnd has associated
 command line arguments, then the arguments in the Cmnd must match exactly those given by
 the user on the command line (or match the wildcards if there are any)."*
@@ -62,6 +77,29 @@ Consequences you can rely on:
   `/usr/bin/pmset`, and the sudoers file itself is `root:wheel 0440` (you cannot modify it
   without `sudo`). Both mitigations are exactly what the literature prescribes.
 
+## The optional background service
+
+The **Background service** is a root LaunchDaemon, `com.aboudjem.Sleepless.timer`, so an
+auto-off timer survives logout and restart. `brew install` sets it up (one administrator
+prompt; Homebrew runs the bundled `grant.sh` and `daemon.sh` with Apple's `/bin/bash`, never
+executing a file from the freshly downloaded bundle directly), or you install it from the
+popover (one macOS authentication sheet):
+
+- `/Library/LaunchDaemons/com.aboudjem.Sleepless.timer.plist` and the check it runs,
+  `/Library/Application Support/Sleepless/sleepless-timerd`, are copied out of the app bundle
+  and owned `root:wheel` (0644 / 0755). launchd never runs root code from the user-writable
+  app bundle.
+- The check runs at boot and every 60 seconds. It reads one small file the app writes,
+  `~/Library/Application Support/Sleepless/timer` (`end=<epoch>`, `floor=<percent>`), accepts
+  only integers, and runs only fixed `pmset` commands: `disablesleep 0/1` and the Energy Mode
+  settings above. It does nothing when the file is absent or the app is running, and it never
+  writes to your home folder (a handled timer is recorded in its own root-owned directory).
+- Worst case is the same as the grant's: your Mac is kept awake until the timer's end time,
+  bounded by your battery floor.
+- **Stop** in the popover unloads and disables it. The popover's switch, `brew uninstall`
+  (and every upgrade, which reinstalls the new version), and **Uninstall…** remove it
+  completely.
+
 ## Honest residual risk
 
 The grant is passwordless **by design**: any process already running as your user can flip
@@ -77,7 +115,9 @@ you can toggle `sudo pmset -a disablesleep 1/0` manually instead and skip the gr
 
 `disablesleep` is a **runtime** setting. A reboot restores normal sleep — there is no way
 for Sleepless to leave your Mac permanently unable to sleep. Verify it yourself: toggle on,
-reboot, then `pmset -g | grep SleepDisabled` should read `0`.
+reboot, then `pmset -g | grep SleepDisabled` should read `0`. The one deliberate exception is
+an auto-off timer carried by the optional background service: it re-applies keep-awake after
+the restart only until that timer's end time.
 
 Sleepless adds a second belt-and-suspenders: a **battery-floor auto-off** (default 15%)
 that flips the flag back to `0` while the Mac is awake and discharging, so a forgotten

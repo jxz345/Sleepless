@@ -432,3 +432,144 @@ popover. Selecting a preset while on restarts its countdown; relaunch still defa
   Editing the selected preset while keep-awake is on restarts the countdown at the new length.
   The timer still starts Off on relaunch.
 
+
+---
+
+## 11. End time, Energy Mode, and the background service (2026-10-12)
+
+**Requests:**
+- show the timer's end time;
+- set High Power while Sleepless is on, and Automatic when it's off (first built as Low Power on battery / High Power on the charger, then changed);
+- keep a running timer through screen lock, logout, and a restart nobody logs in after.
+
+### Design
+
+- **End time:** the countdown reads `Auto-off in 1:23:45 · ends 14:30`. It uses a locale-aware
+  short time, with the weekday when the end isn't today.
+- **Energy Mode:**
+  - `setPowerMode(awake:)` runs `pmset -a powermode 2` (High Power) or `pmset -a powermode 0` (Automatic).
+  - It runs only on state changes: on, off, timer end, battery floor, Low Power Mode auto-off,
+    quit, and Stop. Manual Energy Mode changes in between are left alone.
+  - The three commands were added to the sudoers grant. An old grant fails with "not allowed".
+    The user-initiated switch then offers a one-time permission update (once per launch). The
+    other, automatic paths stay silent.
+- **Timer hand-off file:** `~/Library/Application Support/Sleepless/timer` holds
+  `end=<epoch>`, `floor=<pct>` and `segment=<0–4>`.
+  - It's written whenever a timer is armed and deleted when it ends or is cancelled.
+  - The end date is the source of truth. A 60 s poll plus session-active and screen-wake
+    notifications compare against it, so a late `Timer` can't outlast it.
+  - At launch the app resumes a future timer if `SleepDisabled` is 1, finishes an overdue one,
+    and deletes a stale file.
+- **Background service:** a root LaunchDaemon, `com.aboudjem.Sleepless.timer`, set to
+  `RunAtLoad` and `StartInterval 60`.
+  - `daemon.sh install` copies `timerd.sh` to
+    `/Library/Application Support/Sleepless/sleepless-timerd` (root:wheel), so launchd never
+    runs code from the user-writable bundle.
+  - Each run of the check:
+    1. Does nothing without the file, or while the user's app is running.
+    2. Parses integers only.
+    3. At the end time or the battery floor: restores sleep and the off-state Energy Mode, and
+       records the handled end in a root-owned `handled` file. It never writes to the user's home.
+    4. Otherwise, if `SleepDisabled` is 0 (just rebooted): re-applies keep-awake and High Power.
+- **Hand-off rules** (`applicationWillTerminate`): the app leaves keep-awake on and the file in
+  place only when all of these hold:
+  - a timer is active;
+  - the service is running;
+  - either `NSWorkspace.willPowerOffNotification` fired (logout / restart / shutdown) or Quit
+    was confirmed in the hand-off alert.
+
+  Every other path keeps the old restore: SIGTERM, `brew uninstall`, and no timer.
+- **UI:**
+  - The new card has an install/remove switch (one admin prompt; installing also refreshes the
+    grant), a status line read without root via `launchctl print`, and Start / Stop / Restart.
+  - Start / Stop / Restart are `enable` + `bootstrap`, everything off + `bootout` + `disable`
+    (stays stopped across restarts), and `kickstart -k`. They are sudoers-granted, so they
+    need no password.
+  - Quit moved to a right-click menu on the cup.
+- **Removal:** `uninstall.sh` removes the service *before* stopping the app. That way it can't
+  re-apply keep-awake for a handed-off timer while normal sleep is being restored. The cask's
+  uninstall script does the same for Homebrew (see the follow-up below).
+- **FileVault:** with FileVault on, a normal restart stops at the pre-boot unlock screen,
+  where no daemon runs. Unlocking there logs the user in. "Restart without login" therefore
+  means an unattended restart from a macOS update, or `sudo fdesetup authrestart`. Both boot
+  to the login window with the disk unlocked, and the service works there.
+
+### Findings from live testing (and the fixes)
+
+| # | Symptom | Cause | Fix |
+|---|---|---|---|
+| G1 | After Stop/Start, later clicks closed the popover; log: "Stuck gesture recognizers detected" | Start/Stop disabled *themselves* inside their own click tracking | The service controls run their work on the next run-loop pass (`perform(_:with:afterDelay: 0)`) |
+| G2 | A second Restart froze the app; the menu-bar item looked gone because the hung app couldn't answer Accessibility | `launchctl kickstart -k` waits out launchd's 10 s respawn throttle (measured: 0.01 s, then 10.01 s, 10.02 s back to back), run on the main thread | Service commands run off the main thread with a "Working…" status; the Quit hand-off's kickstart isn't waited for |
+
+### Validation
+
+- **Shell tests:** `tests/timerd_test.sh` (11 cases: no file, app running, reboot re-apply,
+  already awake, end reached, battery at/above floor, malformed file, no or root user, handled
+  once, hooks disabled for root). `tests/uninstall_test.sh` adds service removal. CI runs both.
+- **Live, local build, on battery:**
+  - On gives powermode 2/2; off gave 1/2 (the first Low/High variant; Automatic gives 0/0, see below).
+  - The countdown and status show `ends 1:23 PM`.
+  - Install from the switch (one admin prompt) installs the files root-owned and runs the
+    first check with exit 0. The grant is updated to the 10 commands.
+  - Stop during a timer: `SleepDisabled 0`, file deleted, service unloaded and disabled.
+    Start: running and enabled.
+  - Quit with a 2-minute timer: the app exits and the Mac stays awake. The service logged
+    "auto-off timer ended; restored normal sleep" 10 s after the end time, and powermode
+    ended at 1/2.
+  - Relaunch after that: the stale file was removed. Quit plus relaunch with a timer still
+    running: the Custom segment and the same end time resumed.
+  - Quit with the service stopped: restores sleep immediately, with no prompt.
+
+### Follow-up: login item, Automatic, and Homebrew owning the service
+
+**Requests:**
+- remove "Launch at login" (the service covers it);
+- Automatic Energy Mode when off;
+- Homebrew installs, upgrades and removes the service;
+- authenticate once.
+
+- **Login item merged into the service.** The Launch-at-login card is gone. `syncLoginItem()`
+  registers `SMAppService.mainApp` when the service plist exists and unregisters it otherwise.
+  It runs at every launch and after install/remove, which also retires a login item left by
+  the old switch. Start/Stop don't touch it. `install.sh` no longer writes a LaunchAgent.
+- **Restart race fixed.** After a restart the app could start before the service's first
+  check, see `SleepDisabled 0`, and delete the timer file. The service would then re-apply
+  keep-awake with no timer to end it. Now, with the service installed, a future timer with
+  keep-awake off is resumed and keep-awake re-applied. This is safe because the app deletes the
+  file whenever it turns keep-awake off. A carried timer also sets `userForcedOn` before the
+  first `refresh()`, so the Low Power Mode auto-off can't cancel it at launch.
+- **Automatic when off:** `pmset -a powermode 0`. The grant swaps `-b powermode 1` /
+  `-c powermode 2` for `-a powermode 0`. An older grant gets the existing once-per-launch
+  "Update permission" prompt.
+- **Opt-out marker:** `~/Library/Application Support/Sleepless/service-off`. It's written when
+  the popover removes the service or "Don't Ask Again" is chosen, and deleted on install.
+  Upgrades and the app's offers respect it.
+
+**Homebrew lifecycle** (cask in `jxz345/homebrew-tap`):
+
+| Event | What happens | Password prompts |
+|---|---|---|
+| `brew install` | `postflight_steps` runs `/bin/bash …/grant.sh --yes` and `/bin/bash …/daemon.sh install` with `sudo` (both take the user from `SUDO_USER`), unless the opt-out marker exists | 1 |
+| `brew upgrade` | old uninstall script removes the service through the grant (passwordless); new postflight reinstalls it with the new check | 1 |
+| `brew uninstall` | uninstall script: `sudo -n launchctl bootout` + two fixed-path `sudo -n rm`; prints the manual commands if the grant is missing | 0 |
+| **Uninstall…** | `uninstall.sh`: `sudo -v`, `remove_service`, `brew uninstall --cask`, then grant/prefs cleanup | 1 |
+
+**Findings that shaped it:**
+
+| # | Symptom | Cause | Fix |
+|---|---|---|---|
+| H1 | `brew install` failed: `…/grant.sh --yes was terminated by uncaught signal KILL`, and the install rolled back | Homebrew *executed* the script inside the freshly downloaded, quarantined, not-yet-approved bundle; macOS blocks that | Run Apple's `/bin/bash` with the script as an argument, the same way the app's own setup has worked since jxz.1. Verified: install and upgrade both completed |
+| H2 | **Uninstall…** asked for a password twice | Homebrew runs `sudo --reset-timestamp` before its first privileged command. Its `uninstall launchctl:` always checks with sudo, even when nothing is loaded, and `delete:` always runs `xargs rm` under sudo | No `launchctl:`/`delete:` stanzas. The uninstall script removes the service with two fixed-path `rm` commands added to the grant. Verified: one prompt |
+| H3 | New Homebrew rejects `postflight do … end` (`Cask/InstallSteps`) and `#{appdir}` inside step args | Declarative install steps | `postflight_steps` with `unless_path_exists … base: :home` and `{{appdir}}` templates in `run` args |
+
+**Validated on this Mac** (throwaway tap `jxz345/test` with `file://` zips, later untapped):
+- Fresh install: one prompt. The grant (11 commands) and service were written root-owned,
+  the service loaded, and the check runs for the right user.
+- Upgrade: removed and reinstalled the service, and the check matched the repo's `timerd.sh`.
+  That was with the intermediate cask, whose removal still used brew's `launchctl:`/`delete:`
+  stanzas.
+- **Uninstall…**: one prompt. The app, grant, service, timer and opt-out files, prefs,
+  LaunchAgent and receipt were all removed. `SleepDisabled 0`, powermode 0/0.
+- Not yet run on the final cask: `brew upgrade` (expected one prompt), plain `brew uninstall`
+  (expected none), and the opt-out marker across an upgrade.
+

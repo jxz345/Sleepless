@@ -9,29 +9,36 @@
 //   READ (no root): pmset -g | grep -i SleepDisabled  (value 1 = ON; 0/absent = OFF)
 // The OFF/ON commands run passwordless via a tightly-scoped /etc/sudoers.d drop-in.
 // disablesleep is runtime-only and resets to 0 on reboot, and that reset is a
-// deliberate safety feature; the app does NOT auto re-arm. Quitting the app (Quit button,
+// deliberate safety feature; the app does NOT auto re-arm. Quitting the app (Quit,
 // logout, SIGTERM/SIGINT/SIGHUP) also restores normal sleep when the scoped grant is
-// available. The uninstall flows independently verify sleep before removing the app.
+// available, except for an auto-off timer handed to the optional background service
+// (Feature 4). The uninstall flows independently verify sleep before removing the app.
 //
 // UI: clicking the menu-bar coffee cup opens a small native popover with an NSSwitch
 // toggle (the System-Settings control), a state caption, an auto-off timer, the
-// battery-floor slider, a Launch-at-login switch, Uninstall, and Quit. The menu-bar glyph also
-// shows state at a glance.
+// battery-floor slider, the background-service card (which also covers opening at login),
+// and Uninstall. Right-clicking the cup offers Quit. The menu-bar glyph also shows state at a glance.
 //
 // The coffee-cup metaphor is literal: an EMPTY cup means the Mac sleeps normally, a
 // FULL cup means it is being kept awake (caffeinated), and a full cup with a small
 // dot means it is awake on battery with the auto-off safety net live.
 //
-// Three small, fail-safe features layer on top, none of which adds a daemon or
-// persists OS state (so "reboot resets it" still holds):
+// Fail-safe features layer on top. Only the opt-in Feature 4 adds a daemon; without it,
+// "reboot resets it" still holds:
 //   1. Auto-off timer (three presets, default 1h / 2h / 8h, each adjustable 1–24h via right-click;
-//      or custom up to 24h) — a one-shot in-memory Timer that flips sleep back
-//      on when it fires. Dies on quit; nothing survives a reboot.
-//   2. Launch at login (SMAppService.mainApp) — OFF by default. The app always
-//      launches reading the TRUE system state, so a login launch can never
-//      re-enable disablesleep on its own.
+//      or custom up to 24h) with its end time — flips sleep back on when it ends. The end
+//      date is saved to a small file so it can be resumed or handed to Feature 4.
+//   2. Opens at login (SMAppService.mainApp) — part of Feature 4, off until the service is
+//      installed. The app launches reading the TRUE system state; the only thing it ever
+//      re-applies is an auto-off timer the service was carrying across a restart.
 //   3. Low-Power-Mode auto-off — on battery, if Low Power Mode is on, Sleepless
 //      turns itself off. Same shape as the battery floor, evaluated on the same tick.
+//   4. Background service (opt-in, a root LaunchDaemon installed from the popover): at
+//      logout, restart, or Quit it carries a running timer (keep-awake, battery floor, end).
+//      Without a timer it does nothing. Start / Stop / Restart in the popover; Stop turns
+//      everything off.
+// Energy Mode follows the state: High Power while awake, Automatic when off. Set only on state
+// changes, so manual changes in between stay.
 //
 // Build (mirrors Nexus.app): Command Line Tools `swiftc`, NO Xcode project.
 //   swiftc -O -parse-as-library -target arm64-apple-macos26.0 -framework AppKit \
@@ -58,6 +65,15 @@ private let presetKey = "autoOffPresetHours"
 private let presetDefaults = [1, 2, 8]
 private let presetMin = 1
 private let presetMax = 24
+// Optional background service (a root LaunchDaemon, installed from the popover) that carries an
+// auto-off timer across logout and restart. The app hands it the timer through a small file.
+private let serviceLabel = "com.aboudjem.Sleepless.timer"
+private let servicePlist = "/Library/LaunchDaemons/\(serviceLabel).plist"
+private let timerStateURL = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Application Support/Sleepless/timer")
+// Written when the user removes the service in the popover, so `brew upgrade` (whose postflight
+// installs the service) respects that choice. Deleted when the user installs it again.
+private let serviceOptOutURL = timerStateURL.deletingLastPathComponent().appendingPathComponent("service-off")
 
 // MARK: - Menu-bar coffee glyph (native SF Symbols, MONOCHROME template — state by SHAPE)
 // macOS convention: a menu-bar extra is a template image (no colour) so it adapts to light/dark
@@ -195,7 +211,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var floorSlider: NSSlider!
     private var autoOffControl: PresetSegmentedControl!
     private var countdownLabel: NSTextField!
-    private var loginSwitch: NSSwitch!
+    // Background-service card
+    private var serviceSwitch: NSSwitch!
+    private var serviceDot: NSTextField!
+    private var serviceStatusLabel: NSTextField!
+    private var serviceStart: NSButton!
+    private var serviceStop: NSButton!
+    private var serviceRestart: NSButton!
+    private enum ServiceState { case notInstalled, stopped, running }
+    private var serviceState = ServiceState.notInstalled
+    private var sessionEnding = false        // logout / restart / shutdown in progress
+    private var handOffToService = false     // Quit chosen while the service can carry the timer
+    private var powerGrantPrompted = false   // the Energy Mode permission update is offered once per launch
+    private var serviceOffered = false       // the background-service setup is offered once per launch
     private var clickMonitor: Any?
     private var batteryFloorPercent = floorDefault
     private var isOn = false
@@ -226,7 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var presetSteppers: [NSStepper] = []
 
     private let popoverWidth: CGFloat = 320
-    private let popoverHeight: CGFloat = 460
+    private let popoverHeight: CGFloat = 512
     private let customRowHeight: CGFloat = 30
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -242,19 +270,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.contentSize = NSSize(width: popoverWidth, height: popoverHeight)
         popover.contentViewController = makeContentController()
 
+        let savedTimer = readTimerState()
+        refreshServiceState()
+        syncLoginItem()
+        // A carried timer is one the user chose: honor it over the Low Power Mode auto-off in the
+        // first refresh below (the battery floor still applies).
+        if let saved = savedTimer, saved.end > Date() { userForcedOn = true }
         refresh()   // reflect TRUE system state on launch (never a stale assumption)
+        resumeTimer(savedTimer)
         timer = Timer.scheduledTimer(timeInterval: pollInterval, target: self,
                                      selector: #selector(poll), userInfo: nil, repeats: true)
         installTerminationSignalHandlers()
+        let ws = NSWorkspace.shared.notificationCenter
+        ws.addObserver(self, selector: #selector(sessionWillEnd), name: NSWorkspace.willPowerOffNotification, object: nil)
+        // The 60 s poll also checks; these catch an overdue timer the moment the user is back.
+        ws.addObserver(self, selector: #selector(checkTimerExpiry), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
+        ws.addObserver(self, selector: #selector(checkTimerExpiry), name: NSWorkspace.screensDidWakeNotification, object: nil)
+        ws.addObserver(self, selector: #selector(checkTimerExpiry), name: NSWorkspace.didWakeNotification, object: nil)
     }
+
+    @objc private func sessionWillEnd() { sessionEnding = true }
 
     // MARK: - Restore normal sleep on quit
     // A deleted .app can't run code, so the only reliable moment to undo disablesleep is when
     // the app quits (which Finder, `brew uninstall`, and logout all trigger first). sudo -n with
     // the exact granted argv: synchronous, never prompts. SIGKILL/crash can't be caught; a
     // reboot still resets it.
+    // Exception: a running auto-off timer is handed to the background service at logout /
+    // restart / shutdown, or when Quit was chosen with the service running. The service then
+    // keeps the Mac awake until the timer ends.
     func applicationWillTerminate(_ notification: Notification) {
-        if readSleepDisabled() { setDisableSleep(false) }
+        refreshServiceState()
+        let timerActive = (timerEndDate.map { $0 > Date() } ?? false) && isOn
+        if timerActive, sessionEnding || handOffToService, serviceState == .running {
+            writeTimerState()
+            // Let the service pick the timer up now instead of within a minute. Not waited for:
+            // kickstart can sit out launchd's respawn throttle, and quitting must stay instant.
+            if handOffToService {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+                p.arguments = ["-n", "/bin/launchctl", "kickstart", "-k", "system/\(serviceLabel)"]
+                p.standardInput = FileHandle.nullDevice
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = FileHandle.nullDevice
+                try? p.run()
+            }
+            return
+        }
+        removeTimerState()
+        if readSleepDisabled() {
+            setDisableSleep(false)
+            setPowerMode(awake: false)
+        }
     }
 
     // `kill`/`killall` (SIGTERM), Ctrl-C (SIGINT) and SIGHUP would otherwise end the process
@@ -280,6 +347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             button.image = offGlyph
             button.action = #selector(statusClicked)
             button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])   // right-click opens the Quit menu
         }
     }
 
@@ -420,36 +488,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         maxHint.frame = NSRect(x: contentW - ci - 34, y: ci + 50, width: 34, height: 13)
         g3.addSubview(maxHint)
 
-        // GROUP 4 — launch at login (off by default; never auto-enables sleep prevention)
-        let g4y = g3y + g3h + 12, g4h: CGFloat = 46
-        let g4 = makeCard(NSRect(x: pad, y: g4y, width: contentW, height: g4h))
-        let loginLabel = makeLabel("Launch at login", font: .systemFont(ofSize: 13), color: .labelColor)
-        loginLabel.frame = NSRect(x: ci, y: ci, width: cw - swW - 8, height: 22)
-        g4.addSubview(loginLabel)
-        loginSwitch = NSSwitch()
-        loginSwitch.target = self
-        loginSwitch.action = #selector(loginToggled(_:))
-        loginSwitch.state = loginItemEnabled() ? .on : .off
-        loginSwitch.frame = NSRect(x: contentW - ci - swW, y: ci + (22 - swH) / 2, width: swW, height: swH)
-        g4.addSubview(loginSwitch)
+        // GROUP 5 — optional background service: install/remove switch, status, Start/Stop/Restart
+        let g5y = g3y + g3h + 12, g5h: CGFloat = 98
+        let g5 = makeCard(NSRect(x: pad, y: g5y, width: contentW, height: g5h))
+        let serviceLabelView = makeLabel("Background service", font: .systemFont(ofSize: 13), color: .labelColor)
+        serviceLabelView.frame = NSRect(x: ci, y: ci, width: cw - swW - 8, height: 22)
+        serviceLabelView.toolTip = "Opens Sleepless at login and keeps an auto-off timer running after logout and restart. Installing it needs administrator approval. While no one is logged in, the timer may end up to a minute late."
+        g5.addSubview(serviceLabelView)
+        serviceSwitch = NSSwitch()
+        serviceSwitch.target = self
+        serviceSwitch.action = #selector(serviceToggled(_:))
+        serviceSwitch.toolTip = serviceLabelView.toolTip
+        serviceSwitch.frame = NSRect(x: contentW - ci - swW, y: ci + (22 - swH) / 2, width: swW, height: swH)
+        g5.addSubview(serviceSwitch)
+        serviceDot = makeLabel("●", font: .systemFont(ofSize: 10), color: .tertiaryLabelColor)
+        serviceDot.frame = NSRect(x: ci, y: ci + 29, width: 12, height: 14)
+        g5.addSubview(serviceDot)
+        serviceStatusLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
+        serviceStatusLabel.frame = NSRect(x: ci + 14, y: ci + 28, width: cw - 14, height: 16)
+        serviceStatusLabel.lineBreakMode = .byTruncatingTail
+        g5.addSubview(serviceStatusLabel)
+        func serviceButton(_ title: String, _ action: Selector, _ tip: String, x: CGFloat) -> NSButton {
+            let b = NSButton(title: title, target: self, action: action)
+            b.bezelStyle = .rounded
+            b.controlSize = .small
+            b.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            b.toolTip = tip
+            b.frame = NSRect(x: x, y: ci + 52, width: (cw - 12) / 3, height: 24)
+            g5.addSubview(b)
+            return b
+        }
+        let bw = (cw - 12) / 3 + 6
+        serviceStart = serviceButton("Start", #selector(serviceStartClicked), "Start the background service.", x: ci)
+        serviceStop = serviceButton("Stop", #selector(serviceStopClicked), "Turn off keep-awake, cancel the timer, and stop the background service (it stays stopped after a restart).", x: ci + bw)
+        serviceRestart = serviceButton("Restart", #selector(serviceRestartClicked), "Restart the background service.", x: ci + bw * 2)
 
-        // Footer — complete removal and ordinary Quit.
+        // Footer — complete removal. Quit lives in the menu-bar cup's right-click menu, because
+        // with the background service it no longer means "turn everything off" (that is Stop).
         let uninstall = NSButton(title: "Uninstall…", target: self, action: #selector(uninstall))
         uninstall.toolTip = "Restores normal sleep and removes Sleepless and its setup."
         uninstall.bezelStyle = .rounded
         uninstall.sizeToFit()
-        uninstall.frame.origin = NSPoint(x: pad, y: g4y + g4h + 12)
+        let footerY = g5y + g5h + 12
+        uninstall.frame.origin = NSPoint(x: pad, y: footerY)
         root.addSubview(uninstall)
-        let quit = NSButton(title: "Quit Sleepless", target: self, action: #selector(quit))
-        quit.toolTip = "Quits Sleepless and restores normal sleep."
-        quit.controlSize = .regular
-        quit.bezelStyle = .rounded
-        quit.sizeToFit()
-        let qs = quit.frame.size
-        quit.frame = NSRect(x: W - pad - qs.width, y: g4y + g4h + 12, width: qs.width, height: qs.height)
-        root.addSubview(quit)
+        let quitHint = makeLabel("Right-click the cup to quit", font: .systemFont(ofSize: 11), color: .tertiaryLabelColor)
+        quitHint.alignment = .right
+        quitHint.frame = NSRect(x: W / 2, y: footerY + (uninstall.frame.height - 14) / 2, width: W / 2 - pad, height: 14)
+        root.addSubview(quitHint)
         rootView = root
-        belowTimerViews = [g3, g4, uninstall, quit]
+        belowTimerViews = [g3, g5, uninstall, quitHint]
 
         let vc = NSViewController()
         vc.view = root
@@ -491,12 +579,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     // MARK: - Click the menu-bar cup to open/close the popover
     @objc private func statusClicked() {
+        if NSApp.currentEvent?.type == .rightMouseUp { showStatusMenu(); return }
         if popover.isShown { closePopover() } else { openPopover() }
+    }
+
+    private func showStatusMenu() {
+        guard let button = statusItem.button else { return }
+        if popover.isShown { closePopover() }
+        let menu = NSMenu()
+        let item = NSMenuItem(title: "Quit Sleepless", action: #selector(quit), keyEquivalent: "q")
+        item.target = self
+        menu.addItem(item)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
     }
 
     private func openPopover() {
         refresh()                              // sync switch/caption to TRUE state before showing
-        loginSwitch?.state = loginItemEnabled() ? .on : .off
+        refreshServiceState()
         guard let button = statusItem.button else { return }
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
@@ -543,6 +642,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 return true
             }
         }
+        if result == .ok {
+            // Energy Mode follows the state. An older grant lacks these commands: offer the
+            // permission update once per launch, only from this user-initiated path.
+            if setPowerMode(awake: wantOn) == .grantMissing, !powerGrantPrompted {
+                powerGrantPrompted = true
+                if installGrantViaAuth(upgrade: true) { setPowerMode(awake: wantOn) }
+            }
+            // The service isn't set up (e.g. `brew upgrade` removed it with the old version):
+            // offer it once per launch, through the same native prompt.
+            if wantOn, !serviceOffered, serviceWanted() {
+                serviceOffered = true
+                offerService()
+            }
+        }
         // A deliberate, successful turn-on wins over the Low Power Mode auto-off (hard floor still wins).
         userForcedOn = wantOn && result == .ok
         refresh()                              // applies UI + safety nets; switch reflects reality
@@ -555,23 +668,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // grant.sh as root through osascript's "with administrator privileges"; grant.sh is
     // root-aware so it writes the sudoers drop-in directly with no inner sudo prompt.
     // Returns true once the passwordless grant is in place; after that the app never asks again.
+    // The same single prompt also sets up the background service, unless it's installed or the
+    // user opted out of it.
     @discardableResult
-    private func installGrantViaAuth() -> Bool {
+    private func installGrantViaAuth(upgrade: Bool = false) -> Bool {
+        let withService = serviceWanted()
+        let serviceNote = withService ? " It also sets up the background service, so Sleepless opens at login and an auto-off timer keeps running after logout and restart." : ""
         let intro = NSAlert()
         intro.alertStyle = .informational
-        intro.messageText = "Enable keeping your Mac awake"
-        intro.informativeText = "Sleepless flips a protected macOS setting (pmset disablesleep), so it needs your permission once. macOS will ask you to authenticate (Touch ID or your password). After that the switch works instantly, with no more prompts."
-        intro.addButton(withTitle: "Enable")
+        if upgrade {
+            intro.messageText = "Update Sleepless's permission"
+            intro.informativeText = "Sleepless now switches Energy Mode (High Power while it keeps your Mac awake, Automatic when it's off) and controls its background service. macOS will ask you to authenticate once to update the permission." + serviceNote
+            intro.addButton(withTitle: "Update")
+        } else {
+            intro.messageText = "Enable keeping your Mac awake"
+            intro.informativeText = "Sleepless flips a protected macOS setting (pmset disablesleep), so it needs your permission once. macOS will ask you to authenticate (Touch ID or your password). After that the switch works instantly, with no more prompts." + serviceNote
+            intro.addButton(withTitle: "Enable")
+        }
         intro.addButton(withTitle: "Not now")
         NSApp.activate(ignoringOtherApps: true)
         guard intro.runModal() == .alertFirstButtonReturn else { return false }
+        let ok = runBundledScriptsAsAdmin(withService ? serviceInstallCommands() : [grantCommand()],
+                                          failure: "Setup didn't complete. Try again, or run grant.sh from the app bundle.")
+        if ok, withService { serviceInstalled() }
+        return ok
+    }
 
-        guard let res = Bundle.main.resourcePath else { return false }
-        let grant = res + "/grant.sh"
-        // Pass the REAL user: under the native auth sheet grant.sh runs as root with
-        // SUDO_USER unset, so without this the grant would be written for "root" (useless).
-        let shellCmd = "SLEEPLESS_USER='\(NSUserName())' /bin/bash '\(grant)' --yes"
-        // escape for an AppleScript string literal, then run with one native auth sheet
+    // Grant refresh + service install, run together under one native authentication sheet.
+    private func serviceInstallCommands() -> [String] {
+        [grantCommand(), "/bin/bash \(shellQuote(resourcePath("daemon.sh"))) install \(shellQuote(NSUserName()))"]
+    }
+
+    private func serviceInstalled() {
+        setServiceOptOut(false)
+        refreshServiceState()
+        syncLoginItem()
+    }
+
+    // Wanted unless installed or opted out (the popover's switch, or "Don't Ask Again").
+    private func serviceWanted() -> Bool {
+        refreshServiceState()
+        return serviceState == .notInstalled && !FileManager.default.fileExists(atPath: serviceOptOutURL.path)
+    }
+
+    private func offerService() {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Set up the background service?"
+        alert.informativeText = "Sleepless will open at login, and an auto-off timer will keep running after you log out or restart. macOS will ask you to authenticate. You can change this later in the popover."
+        alert.addButton(withTitle: "Set Up")
+        alert.addButton(withTitle: "Not Now")
+        alert.addButton(withTitle: "Don't Ask Again")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            if runBundledScriptsAsAdmin(serviceInstallCommands(), failure: "The background service could not be installed.") {
+                serviceInstalled()
+            }
+        case .alertThirdButtonReturn:
+            setServiceOptOut(true)
+        default:
+            break
+        }
+    }
+
+    // Pass the REAL user: under the native auth sheet grant.sh runs as root with SUDO_USER
+    // unset, so without this the grant would be written for "root" (useless).
+    private func grantCommand() -> String {
+        "SLEEPLESS_USER=\(shellQuote(NSUserName())) /bin/bash \(shellQuote(resourcePath("grant.sh"))) --yes"
+    }
+
+    private func resourcePath(_ name: String) -> String {
+        (Bundle.main.resourcePath ?? "") + "/" + name
+    }
+
+    // Run bundled, audited scripts as root through ONE native macOS authentication sheet
+    // (osascript "with administrator privileges"). Returns true when every command succeeded.
+    private func runBundledScriptsAsAdmin(_ commands: [String], failure: String) -> Bool {
+        let shellCmd = commands.joined(separator: " && ")
+        // escape for an AppleScript string literal
         let escaped = shellCmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
         let osa = "do shell script \"\(escaped)\" with administrator privileges"
         let proc = Process()
@@ -579,12 +754,153 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         proc.arguments = ["-e", osa]
         proc.standardOutput = Pipe(); proc.standardError = Pipe()
         do { try proc.run(); proc.waitUntilExit() }
-        catch { notify("Couldn't start the one-time setup."); return false }
-        if proc.terminationStatus == 0 { return true }   // grant.sh installed the rule successfully
-        if proc.terminationStatus != 128 {               // 128 = user cancelled the auth sheet
-            notify("Setup didn't complete. Try again, or run grant.sh from the app bundle.")
-        }
+        catch { notify("Couldn't start the administrator step."); return false }
+        if proc.terminationStatus == 0 { return true }
+        if proc.terminationStatus != 128 { notify(failure) }   // 128 = user cancelled the auth sheet
         return false
+    }
+
+    // MARK: - Background service (optional root LaunchDaemon; see daemon.sh / timerd.sh)
+    // Status needs no root: `launchctl print` exits non-zero when the service isn't loaded.
+    private func refreshServiceState() {
+        if !FileManager.default.fileExists(atPath: servicePlist) {
+            serviceState = .notInstalled
+        } else {
+            serviceState = runStatus("/bin/launchctl", ["print", "system/\(serviceLabel)"]) == 0 ? .running : .stopped
+        }
+        renderServiceCard()
+    }
+
+    private func renderServiceCard() {
+        guard let label = serviceStatusLabel else { return }
+        if serviceBusy {
+            label.stringValue = "Working…"
+            for b in [serviceStart, serviceStop, serviceRestart] { b?.isEnabled = false }
+            serviceSwitch.isEnabled = false
+            return
+        }
+        serviceSwitch.isEnabled = true
+        let carriesTimer = isOn && (timerEndDate.map { $0 > Date() } ?? false)
+        switch serviceState {
+        case .notInstalled:
+            label.stringValue = "Not installed · timers end at logout"
+            serviceDot.textColor = .tertiaryLabelColor
+        case .stopped:
+            label.stringValue = "Stopped · timers end at logout"
+            serviceDot.textColor = .systemOrange
+        case .running:
+            label.stringValue = carriesTimer
+                ? "Running · keeps the timer to \(endTimeText(timerEndDate!))"
+                : "Running · opens at login, keeps timers"
+            serviceDot.textColor = .systemGreen
+        }
+        serviceSwitch.state = serviceState == .notInstalled ? .off : .on
+        serviceStart.isEnabled = serviceState == .stopped
+        serviceStop.isEnabled = serviceState == .running
+        serviceRestart.isEnabled = serviceState == .running
+    }
+
+    // The service controls run their work on the next run-loop pass: they show alerts, block on
+    // sudo, and disable themselves (Start/Stop), and doing that inside the click's own tracking
+    // leaves AppKit's gesture recognizer stuck, after which the popover mishandles clicks.
+    @objc private func serviceToggled(_ sender: NSSwitch) {
+        perform(#selector(performServiceToggle), with: nil, afterDelay: 0)
+    }
+
+    @objc private func serviceStartClicked() { perform(#selector(performServiceStart), with: nil, afterDelay: 0) }
+    @objc private func serviceStopClicked() { perform(#selector(performServiceStop), with: nil, afterDelay: 0) }
+    @objc private func serviceRestartClicked() { perform(#selector(performServiceRestart), with: nil, afterDelay: 0) }
+
+    @objc private func performServiceToggle() {
+        commitPendingEdits()
+        let install = serviceSwitch.state == .on
+        let alert = NSAlert()
+        alert.messageText = install ? "Install the background service?" : "Remove the background service?"
+        alert.informativeText = install
+            ? "Sleepless will open at login, and a small root service (com.aboudjem.Sleepless.timer) will keep an auto-off timer running after you log out or restart. It checks once a minute and at startup, still turns off at your battery floor, and does nothing without a timer. macOS will ask you to authenticate."
+            : "Sleepless will no longer open at login, and timers will end at logout again. macOS will ask you to authenticate."
+        alert.addButton(withTitle: install ? "Install" : "Remove")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            // Installing also refreshes the grant, which covers Start / Stop / Restart.
+            let commands = install
+                ? serviceInstallCommands()
+                : ["/bin/bash \(shellQuote(resourcePath("daemon.sh"))) remove"]
+            if runBundledScriptsAsAdmin(commands, failure: "The background service could not be \(install ? "installed" : "removed").") {
+                setServiceOptOut(!install)
+            }
+        }
+        refreshServiceState()
+        syncLoginItem()
+    }
+
+    private func setServiceOptOut(_ optOut: Bool) {
+        if optOut {
+            try? FileManager.default.createDirectory(at: serviceOptOutURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            FileManager.default.createFile(atPath: serviceOptOutURL.path, contents: nil)
+        } else {
+            try? FileManager.default.removeItem(at: serviceOptOutURL)
+        }
+    }
+
+    @objc private func performServiceStart() {
+        serviceCommand([["/bin/launchctl", "enable", "system/\(serviceLabel)"],
+                        ["/bin/launchctl", "bootstrap", "system", servicePlist]])
+    }
+
+    // Stop turns everything off (keep-awake, timer, Energy Mode), then stops the service and
+    // disables it so it stays stopped across restarts until Start.
+    @objc private func performServiceStop() {
+        commitPendingEdits()
+        if readSleepDisabled() {
+            setDisableSleep(false)
+            setPowerMode(awake: false)
+        }
+        userForcedOn = false
+        cancelKeepAwakeTimer()
+        refresh()
+        serviceCommand([["/bin/launchctl", "bootout", "system/\(serviceLabel)"],
+                        ["/bin/launchctl", "disable", "system/\(serviceLabel)"]])
+    }
+
+    @objc private func performServiceRestart() {
+        serviceCommand([["/bin/launchctl", "kickstart", "-k", "system/\(serviceLabel)"]])
+    }
+
+    // launchctl can block for up to launchd's 10 s respawn throttle (e.g. a Restart shortly after
+    // the minute check), so the commands run off the main thread while the card shows "Working…".
+    private var serviceBusy = false
+
+    private func serviceCommand(_ commands: [[String]]) {
+        guard !serviceBusy else { return }
+        serviceBusy = true
+        renderServiceCard()
+        Task.detached {
+            let missing = commands.map { AppDelegate.sudo($0) }.contains(.grantMissing)
+            await MainActor.run { self.finishServiceCommand(commands, grantMissing: missing) }
+        }
+    }
+
+    private func finishServiceCommand(_ commands: [[String]], grantMissing: Bool) {
+        serviceBusy = false
+        // An older grant doesn't cover these commands: update it once, then retry.
+        if grantMissing, installGrantViaAuth(upgrade: true) {
+            serviceCommand(commands)
+            return
+        }
+        refreshServiceState()
+    }
+
+    private func runStatus(_ launchPath: String, _ args: [String]) -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: launchPath)
+        process.arguments = args
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return -1 }
+        process.waitUntilExit()
+        return process.terminationStatus
     }
 
     // A brief, subtle pulse on the menu-bar glyph whenever the state (and thus the cup
@@ -601,7 +917,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
-    @objc private func poll() { refresh() }
+    @objc private func poll() {
+        refresh()
+        checkTimerExpiry()
+    }
 
     // MARK: - Auto-off timer (Feature 1)
     @objc private func autoOffChanged(_ sender: NSSegmentedControl) {
@@ -621,12 +940,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func startKeepAwakeTimer(minutes: Int) {
+        guard minutes > 0 else { cancelKeepAwakeTimer(); updateCountdownLabel(); return }
+        armTimer(until: Date().addingTimeInterval(TimeInterval(minutes * 60)))
+    }
+
+    // The end date is the source of truth: the Timer is only a wake-up, and the expiry check
+    // below compares against the date, so a late or missed Timer can't outlast the end time.
+    private func armTimer(until end: Date) {
         cancelKeepAwakeTimer()
-        guard minutes > 0, isOn else { updateCountdownLabel(); return }
-        let seconds = TimeInterval(minutes * 60)
-        timerEndDate = Date().addingTimeInterval(seconds)
-        keepAwakeTimer = Timer.scheduledTimer(timeInterval: seconds, target: self,
+        guard isOn, end > Date() else { updateCountdownLabel(); return }
+        timerEndDate = end
+        keepAwakeTimer = Timer.scheduledTimer(timeInterval: end.timeIntervalSinceNow, target: self,
                                               selector: #selector(keepAwakeTimerFired), userInfo: nil, repeats: false)
+        writeTimerState()
         if popover.isShown { startCountdownTicker() }
         updateCountdownLabel()
     }
@@ -634,11 +960,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func cancelKeepAwakeTimer() {
         keepAwakeTimer?.invalidate(); keepAwakeTimer = nil
         countdownTicker?.invalidate(); countdownTicker = nil
+        if timerEndDate != nil { removeTimerState() }
         timerEndDate = nil
+    }
+
+    @objc private func checkTimerExpiry() {
+        if isOn, let end = timerEndDate, Date() >= end { keepAwakeTimerFired() }
     }
 
     @objc private func keepAwakeTimerFired() {
         setDisableSleep(false)
+        setPowerMode(awake: false)
         cancelKeepAwakeTimer()
         autoOffMinutes = 0
         autoOffControl?.selectedSegment = 0
@@ -782,22 +1114,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard remaining > 0 else { countdownLabel?.stringValue = ""; return }
         let h = remaining / 3600, m = (remaining % 3600) / 60, s = remaining % 60
         let t = h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
-        countdownLabel?.stringValue = "Auto-off in \(t)"
+        countdownLabel?.stringValue = "Auto-off in \(t) · ends \(endTimeText(end))"
+        renderServiceCard()
     }
 
-    // MARK: - Launch at login (Feature 2) — OFF by default; never re-enables sleep prevention
-    @objc private func loginToggled(_ sender: NSSwitch) {
+    // "14:30" today, "Tue 09:15" on another day (locale-aware).
+    private let endTimeFormatter: DateFormatter = {
+        let f = DateFormatter(); f.setLocalizedDateFormatFromTemplate("jmm"); return f
+    }()
+    private let endDayTimeFormatter: DateFormatter = {
+        let f = DateFormatter(); f.setLocalizedDateFormatFromTemplate("EEEjmm"); return f
+    }()
+    private func endTimeText(_ end: Date) -> String {
+        (Calendar.current.isDateInToday(end) ? endTimeFormatter : endDayTimeFormatter).string(from: end)
+    }
+
+    // MARK: - Timer hand-off file (read by the background service while the app isn't running)
+    // end=<epoch seconds>, floor=<battery %>, segment=<selected timer segment>
+    private func writeTimerState() {
+        guard let end = timerEndDate else { return }
+        let text = "end=\(Int(end.timeIntervalSince1970))\nfloor=\(batteryFloorPercent)\nsegment=\(autoOffControl?.selectedSegment ?? 0)\n"
         do {
-            if sender.state == .on { try SMAppService.mainApp.register() }
-            else { try SMAppService.mainApp.unregister() }
+            try FileManager.default.createDirectory(at: timerStateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try text.write(to: timerStateURL, atomically: true, encoding: .utf8)
+        } catch {
+            NSLog("Sleepless: could not save the timer: %@", error.localizedDescription)
+        }
+    }
+
+    private func removeTimerState() {
+        try? FileManager.default.removeItem(at: timerStateURL)
+    }
+
+    private func readTimerState() -> (end: Date, segment: Int)? {
+        guard let text = try? String(contentsOf: timerStateURL, encoding: .utf8) else { return nil }
+        var values: [String: Int] = [:]
+        for line in text.split(separator: "\n") {
+            let kv = line.split(separator: "=", maxSplits: 1)
+            if kv.count == 2, let v = Int(kv[1]) { values[String(kv[0])] = v }
+        }
+        guard let end = values["end"] else { return nil }
+        return (Date(timeIntervalSince1970: TimeInterval(end)), min(max(values["segment"] ?? 0, 0), 4))
+    }
+
+    // At launch: pick up a timer that the background service carried (or that survived a crash).
+    private func resumeTimer(_ saved: (end: Date, segment: Int)?) {
+        guard let saved else { return }
+        if saved.end <= Date() {                              // overdue: finish it now
+            if isOn {
+                timerEndDate = saved.end
+                keepAwakeTimerFired()
+            } else {
+                removeTimerState()
+            }
+            return
+        }
+        if !isOn {
+            // The app deletes this file whenever it turns keep-awake off, so a future end with
+            // keep-awake off means a restart reset disablesleep. With the service installed the
+            // timer was meant to survive: if the app beat the service's first check after boot,
+            // re-apply keep-awake here instead of dropping the timer. Without it, timers end at logout.
+            guard serviceState != .notInstalled, setDisableSleep(true) == .ok else {
+                userForcedOn = false
+                removeTimerState()
+                return
+            }
+            setPowerMode(awake: true)
+            applyUI(on: readSleepDisabled())
+            guard isOn else { removeTimerState(); return }
+        }
+        userForcedOn = true                                   // the user chose this timer
+        autoOffControl?.selectedSegment = saved.segment
+        switch saved.segment {
+        case 1...3: autoOffMinutes = presetHours[saved.segment - 1] * 60
+        case 4: autoOffMinutes = customMinutes
+        default: autoOffMinutes = 0
+        }
+        layoutTimerCard(showCustom: saved.segment == 4)
+        armTimer(until: saved.end)
+    }
+
+    // MARK: - Opens at login (Feature 2) — part of the background service; never re-enables sleep prevention
+    // The login item follows the service's installation (not Start/Stop): installed means the app
+    // opens at login, so it can resume a carried timer and show it. Synced at every launch, which
+    // also retires a login item from older versions' separate "Launch at login" switch.
+    private func syncLoginItem() {
+        let want = serviceState != .notInstalled
+        let status = SMAppService.mainApp.status
+        do {
+            if want, status != .enabled { try SMAppService.mainApp.register() }
+            if !want, status != .notRegistered { try SMAppService.mainApp.unregister() }
         } catch {
             NSLog("Sleepless: login item update failed: %@", error.localizedDescription)
-            notify("Couldn't update Launch at login.")
         }
-        sender.state = loginItemEnabled() ? .on : .off
     }
-
-    private func loginItemEnabled() -> Bool { SMAppService.mainApp.status == .enabled }
 
     // MARK: - Core state sync
     @objc private func refresh() {
@@ -850,6 +1260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if v != batteryFloorPercent {
             batteryFloorPercent = v
             UserDefaults.standard.set(v, forKey: floorKey)
+            writeTimerState()   // the service enforces the same floor while the app isn't running
         }
         renderText()
     }
@@ -859,13 +1270,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // sudoers grant isn't installed (sudo -n refused), the one case that warrants setup; `.failed`
     // = any other error. Using sudo's own result (instead of re-reading SleepDisabled) is the fix:
     // a safety net flipping sleep back on must never look like "permission missing" and re-prompt.
-    private enum ToggleResult: Equatable { case ok, grantMissing, failed(String) }
+    private enum ToggleResult: Equatable, Sendable { case ok, grantMissing, failed(String) }
 
     @discardableResult
     private func setDisableSleep(_ on: Bool) -> ToggleResult {
-        // sudo -n: never prompt (GUI app has no TTY). The exact argument vector matches the
-        // NOPASSWD sudoers grant, so this runs without a password.
-        let (exit, _, err) = runPrivileged(["-n", "/usr/bin/pmset", "-a", "disablesleep", on ? "1" : "0"])
+        runSudo(["/usr/bin/pmset", "-a", "disablesleep", on ? "1" : "0"])
+    }
+
+    // Energy Mode follows Sleepless: High Power while kept awake, Automatic when off.
+    // Macs without `powermode` just fail quietly (.failed).
+    @discardableResult
+    private func setPowerMode(awake: Bool) -> ToggleResult {
+        runSudo(["/usr/bin/pmset", "-a", "powermode", awake ? "2" : "0"])
+    }
+
+    // sudo -n: never prompt (GUI app has no TTY). Each argument vector matches the NOPASSWD
+    // sudoers grant exactly, so it runs without a password.
+    @discardableResult
+    private func runSudo(_ command: [String]) -> ToggleResult { Self.sudo(command) }
+
+    // Thread-safe core of runSudo, also used by the background-service commands off the main thread.
+    nonisolated private static func sudo(_ command: [String]) -> ToggleResult {
+        let (exit, _, err) = runPrivileged(["-n"] + command)
         let result: ToggleResult
         if exit == 0 {
             result = .ok
@@ -882,7 +1308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // Run a privileged command via sudo, capturing exit status + stderr (which the generic
     // runCapture discards). stdin is /dev/null so a GUI process with no controlling TTY can
     // never block on a prompt. This is what lets the app KNOW whether its own toggle worked.
-    private func runPrivileged(_ args: [String]) -> (exit: Int32, out: String, err: String) {
+    nonisolated private static func runPrivileged(_ args: [String]) -> (exit: Int32, out: String, err: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
         process.arguments = args
@@ -914,6 +1340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // Hard battery floor ALWAYS wins, even over a deliberate turn-on: never drain to empty.
         if percent <= batteryFloorPercent {
             setDisableSleep(false); userForcedOn = false
+            setPowerMode(awake: false)
             applyUI(on: readSleepDisabled())
             notify("Battery low (\(percent)%). Sleepless turned off.")
             return
@@ -921,6 +1348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // Low Power Mode auto-off, UNLESS the user deliberately chose to keep awake this session.
         if ProcessInfo.processInfo.isLowPowerModeEnabled && !userForcedOn {
             setDisableSleep(false)
+            setPowerMode(awake: false)
             applyUI(on: readSleepDisabled())
             notify("Low Power Mode on. Sleepless turned off.")
         }
@@ -979,7 +1407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         closePopover()
         let alert = NSAlert()
         alert.messageText = "Uninstall Sleepless?"
-        alert.informativeText = "Restore normal sleep and remove the app, Launch at login, the permission grant, and preferences. Terminal will open to show progress and may ask for your administrator password."
+        alert.informativeText = "Restore normal sleep and remove the app, the background service and login item, the permission grant, and preferences. Terminal will open to show progress and may ask for your administrator password."
         alert.addButton(withTitle: "Cancel")
         alert.addButton(withTitle: "Uninstall")
         NSApp.activate(ignoringOtherApps: true)
@@ -1022,7 +1450,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    @objc private func quit() { NSApp.terminate(nil) }
+    // Quit closes the menu-bar app. With a timer running and the service able to carry it, the
+    // Mac stays awake until the timer ends; otherwise quitting restores normal sleep as before.
+    @objc private func quit() {
+        refreshServiceState()
+        if isOn, let end = timerEndDate, end > Date(), serviceState == .running {
+            let alert = NSAlert()
+            alert.messageText = "Quit Sleepless?"
+            alert.informativeText = "The background service keeps your Mac awake until the timer ends at \(endTimeText(end)). To turn everything off now, use Stop instead."
+            alert.addButton(withTitle: "Quit")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            handOffToService = true
+        }
+        NSApp.terminate(nil)
+    }
 }
 
 @main

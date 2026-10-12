@@ -3,8 +3,8 @@
 # sleep without a prompt. Self-contained: works from a clone OR from inside the app
 # bundle (Contents/Resources), so Homebrew-cask users can run it after install.
 #
-# It writes one tightly scoped sudoers drop-in (root:wheel, 0440) permitting exactly two
-# commands and nothing else. See SECURITY.md. Undo with uninstall.sh (or sudo rm the file).
+# It writes one tightly scoped sudoers drop-in (root:wheel, 0440) permitting exactly the
+# commands in sleepless.sudoers.template and nothing else. See SECURITY.md. Undo with uninstall.sh (or sudo rm the file).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,14 +33,16 @@ TEMPLATE="$SCRIPT_DIR/sleepless.sudoers.template"
 if [ -f "$TEMPLATE" ]; then
   GRANT="$(sed "s/__USER__/$USER_NAME/" "$TEMPLATE")"
 else
-  GRANT="$USER_NAME ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1"
+  GRANT="$USER_NAME ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a powermode 2, /usr/bin/pmset -a powermode 0, /bin/launchctl enable system/com.aboudjem.Sleepless.timer, /bin/launchctl disable system/com.aboudjem.Sleepless.timer, /bin/launchctl bootstrap system /Library/LaunchDaemons/com.aboudjem.Sleepless.timer.plist, /bin/launchctl bootout system/com.aboudjem.Sleepless.timer, /bin/launchctl kickstart -k system/com.aboudjem.Sleepless.timer, /bin/rm -f /Library/LaunchDaemons/com.aboudjem.Sleepless.timer.plist, /bin/rm -rf /Library/Application\\ Support/Sleepless"
 fi
 
 echo "Sleepless will install this passwordless grant at $SUDOERS_DST (root:wheel, 0440):"
 echo ""
 echo "    $GRANT"
 echo ""
-echo "It permits ONLY turning lid-close sleep on (1) or off (0). Nothing else."
+echo "It permits ONLY: turning lid-close sleep on (1) or off (0), switching Energy Mode"
+echo "(High Power while awake, Automatic when off), and starting/stopping/restarting"
+echo "Sleepless's own background service. Nothing else."
 if [ "${1:-}" != "--yes" ] && [ "${1:-}" != "-y" ]; then
   read -r -p "Continue? [y/N] " reply
   case "$reply" in [yY]*) ;; *) echo "Aborted."; exit 1 ;; esac

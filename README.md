@@ -44,11 +44,14 @@
 > A closed lid sleeps your Mac, and `caffeinate` apps (KeepingYouAwake and friends) can't change that, by design. Sleepless flips the one setting that can, `pmset disablesleep`, with safety nets so it is safe to forget.
 
 > [!IMPORTANT]
-> **This is a fork** of [Aboudjem/Sleepless](https://github.com/Aboudjem/Sleepless), released as `<upstream version>-jxz.<n>` (currently **1.2.7-jxz.2**) so it never collides with upstream releases. The translated READMEs describe upstream. Background, findings and design decisions: **[UPDATE_NOTES.md](UPDATE_NOTES.md)**.
+> **This is a fork** of [Aboudjem/Sleepless](https://github.com/Aboudjem/Sleepless), released as `<upstream version>-jxz.<n>` (currently **1.2.7-jxz.3**) so it never collides with upstream releases. The translated READMEs describe upstream. Background, findings and design decisions: **[UPDATE_NOTES.md](UPDATE_NOTES.md)**.
 >
 > **What's different in this fork**
 > - **Custom auto-off timer:** choose **Off · 1h · 2h · 8h · Custom**, and set any length from 1 minute to 24 hours with an hours + minutes row. Right-click the timer control to change the three presets (whole hours, 1–24).
-> - **Quitting or uninstalling restores normal sleep.** Upstream left `disablesleep` on when the app was quit or deleted, so the Mac would not sleep until a reboot. Now the Quit button, logout, `kill`/`killall`, and `brew uninstall` all turn it off.
+> - **The timer shows its end time** next to the countdown (`Auto-off in 1:23:45 · ends 14:30`).
+> - **Energy Mode follows Sleepless:** High Power while it keeps the Mac awake, Automatic when it turns off. Set only when the state changes, so your own changes in between stay.
+> - **Optional background service** so a running timer survives screen lock, logout, and restart (including a restart nobody logs in after, such as an overnight macOS update). `brew install` sets it up (with the permission grant) under one password prompt; it also opens Sleepless at login, replacing the old **Launch at login** switch. The popover's **Background service** card always shows its status, turns it off or on, and has **Start / Stop / Restart**. **Stop** turns everything off. Without a timer the service does nothing.
+> - **Quitting or uninstalling restores normal sleep.** Upstream left `disablesleep` on when the app was quit or deleted, so the Mac would not sleep until a reboot. Now Quit (right-click the menu-bar cup), logout, `kill`/`killall`, and `brew uninstall` all turn it off. The one exception: with the background service running, a running timer is handed to it and still ends on time.
 > - **Steadier menu-bar icon:** it keeps the same width in every state and recovers if macOS drops it (upstream PRs [#1](https://github.com/Aboudjem/Sleepless/pull/1) and [#5](https://github.com/Aboudjem/Sleepless/pull/5)).
 
 ## Install
@@ -60,7 +63,7 @@ open "/Applications/Sleepless.app"
 
 The app is ad-hoc signed, not notarized. If macOS blocks it, try **System Settings → Privacy & Security → Open Anyway** and confirm **Open**. If that option is absent or ineffective, use the [launch recovery](#if-launch-hangs-or-open-anyway-does-nothing) below.
 
-Once the cup appears in the menu bar, turn on keep-awake. If the passwordless grant is missing, the app offers one-time setup through a macOS authentication sheet. The manual fallback is:
+Installing asks for your administrator password once: Homebrew runs the bundled `grant.sh` and `daemon.sh` with `/bin/bash` to set up the passwordless grant and the background service (which also opens Sleepless at login). Upgrades ask once too, and keep the service off if you turned it off. If the grant is ever missing, the app offers the same setup through a macOS authentication sheet when you turn on keep-awake. The manual fallback is:
 
 ```sh
 /bin/bash "/Applications/Sleepless.app/Contents/Resources/grant.sh"
@@ -77,7 +80,7 @@ Once the cup appears in the menu bar, turn on keep-awake. If the passwordless gr
 | Other ways | |
 |---|---|
 | **Download** | Grab the [latest release](https://github.com/jxz345/Sleepless/releases/latest) (`Sleepless-<version>-jxz.<n>.zip`), unzip to `/Applications`, and follow the same launch and recovery steps above. |
-| **Build from source** | `git clone https://github.com/jxz345/Sleepless.git && cd Sleepless && ./install.sh` (requires the Command Line Tools; builds locally, installs the grant, and adds a login item). |
+| **Build from source** | `git clone https://github.com/jxz345/Sleepless.git && cd Sleepless && ./install.sh` (requires the Command Line Tools; builds locally and installs the grant; turn on **Background service** in the popover to open it at login). |
 
 Then click the cup in the menu bar, flip the switch, and close the lid.
 
@@ -115,12 +118,13 @@ Restoring sleep clears Sleepless's `disablesleep` override; your existing macOS 
 | | | |
 |---|---|---|
 | ☕ | **One switch** | Click the menu-bar cup, flip the toggle. |
-| ⏲️ | **Auto-off timer** | Three presets (1h, 2h, 8h by default; right-click to change, 1–24h), or any custom length up to 24h, with a live countdown, then off. |
+| ⏲️ | **Auto-off timer** | Three presets (1h, 2h, 8h by default; right-click to change, 1–24h), or any custom length up to 24h, with a live countdown and end time, then off. |
+| ⚡ | **Energy Mode** | High Power while awake, Automatic when off. |
+| 🌙 | **Background service** | Opens Sleepless at login; a running timer survives lock, logout, and restart. Start / Stop / Restart from the popover. |
 | 🔋 | **Battery floor** | Auto-off at 5–50% on battery (default 15%). |
 | 🪫 | **Low Power Mode** | Steps aside when LPM is on, on battery. |
 | 🖥️ | **No dongle** | Lid closed, on battery. No monitor, no HDMI plug. |
-| 🚀 | **Launch at login** | Optional, off by default, always starts idle. |
-| 🪶 | **Tiny + native** | One AppKit file. No Dock icon, daemon, or kext. |
+| 🪶 | **Tiny + native** | One AppKit file. No Dock icon or kext; the only daemon is the optional background service. |
 
 **Menu-bar glyph:** empty cup = off · full cup = awake · full cup + dot = awake on battery (auto-off live).
 

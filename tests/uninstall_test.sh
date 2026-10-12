@@ -108,6 +108,12 @@ BUNDLE_ID=com.aboudjem.Sleepless
 SUDOERS_DST="$FIXTURE/grant"
 LAUNCH_AGENT="$FIXTURE/login.plist"
 PREFERENCES="$FIXTURE/preferences.plist"
+SERVICE_LABEL=com.aboudjem.Sleepless.timer
+SERVICE_PLIST="$FIXTURE/service.plist"
+SERVICE_DIR="$FIXTURE/service dir"
+TIMER_STATE="$FIXTURE/timer"
+SERVICE_OPT_OUT="$FIXTURE/service-off"
+mkdir -p "$SERVICE_DIR"; touch "$SERVICE_PLIST" "$SERVICE_DIR/sleepless-timerd" "$TIMER_STATE" "$SERVICE_OPT_OUT"
 BREW=/opt/homebrew/bin/brew
 CASK=jxz345/tap/sleepless
 CASKROOM="$FIXTURE/caskroom"
@@ -115,7 +121,10 @@ touch "$SUDOERS_DST" "$LAUNCH_AGENT" "$PREFERENCES"
 run() {
     case "$1" in
         /usr/bin/pmset) echo 'SleepDisabled 0' ;;
-        /usr/bin/pgrep|/bin/launchctl|/usr/bin/defaults) return 1 ;;
+        /bin/launchctl)
+            [ "$2 $3" = "print system/$SERVICE_LABEL" ] && return 0   # service loaded
+            return 1 ;;
+        /usr/bin/pgrep|/usr/bin/defaults) return 1 ;;
         "$APP/Contents/MacOS/Sleepless") [ "$2" = --unregister-login-item ] ;;
         "$BREW")
             [ "$*" = "$BREW uninstall --cask $CASK" ] || return 97
@@ -123,15 +132,29 @@ run() {
         /usr/bin/sudo)
             [ "$2" = -n ] || return 97
             case "$3" in
-                /bin/rm) [ "$5" = "$SUDOERS_DST" ] && /bin/rm -f "$SUDOERS_DST" ;;
+                /bin/rm)
+                    case "$4 $5" in
+                        "-f $SUDOERS_DST"|"-f $SERVICE_PLIST"|"-rf $SERVICE_DIR") /bin/rm "$4" "$5" ;;
+                        *) return 97 ;;
+                    esac ;;
+                /bin/launchctl)
+                    case "$4 $5" in
+                        "bootout system/$SERVICE_LABEL") echo bootout >> "$FIXTURE/service-calls" ;;
+                        "enable system/$SERVICE_LABEL") return 0 ;;
+                        *) return 97 ;;
+                    esac ;;
                 /usr/sbin/visudo) return 0 ;;
                 *) return 97 ;;
             esac ;;
         /bin/rm)
-            case "$3" in "$FIXTURE"/*) /bin/rm "$2" "$3" ;; *) return 97 ;; esac ;;
+            shift; local flag=$1; shift
+            for f in "$@"; do case "$f" in "$FIXTURE"/*) ;; *) return 97 ;; esac; done
+            /bin/rm "$flag" "$@" ;;
         *) echo "Unexpected cleanup command: $*" >&2; return 97 ;;
     esac
 }
 remove_setup
 [ ! -e "$APP" ] && [ ! -e "$SUDOERS_DST" ] && [ ! -e "$PREFERENCES" ] && [ ! -e "$LAUNCH_AGENT" ]
+[ ! -e "$SERVICE_PLIST" ] && [ ! -e "$SERVICE_DIR" ] && [ ! -e "$TIMER_STATE" ] && [ ! -e "$SERVICE_OPT_OUT" ] && [ "$(cat "$FIXTURE/service-calls")" = bootout ]
 echo 'PASS: complete cleanup uses plain brew uninstall and noninteractive sudo only'
+echo 'PASS: cleanup unloads the background service and removes its files and timer'
